@@ -1,0 +1,223 @@
+season,team_code,playoff_round_reached,source
+1997,HOU,Champion,manual:1997-2000
+1997,CHA,Lost 1 Round From Title,manual:1997-2000
+1997,PHO,Lost 1 Round From Title,manual:1997-2000
+1997,NYL,Lost Finals,manual:1997-2000
+1998,HOU,Champion,manual:1997-2000
+1998,CHA,Lost 1 Round From Title,manual:1997-2000
+1998,CLE,Lost 1 Round From Title,manual:1997-2000
+1998,PHO,Lost Finals,manual:1997-2000
+1999,HOU,Champion,manual:1997-2000
+1999,CHA,Lost 1 Round From Title,manual:1997-2000
+1999,LAS,Lost 1 Round From Title,manual:1997-2000
+1999,DET,Lost 2 Rounds From Title,manual:1997-2000
+1999,SAC,Lost 2 Rounds From Title,manual:1997-2000
+1999,NYL,Lost Finals,manual:1997-2000
+2000,HOU,Champion,manual:1997-2000
+2000,CLE,Lost 1 Round From Title,manual:1997-2000
+2000,LAS,Lost 1 Round From Title,manual:1997-2000
+2000,ORL,Lost 2 Rounds From Title,manual:1997-2000
+2000,PHO,Lost 2 Rounds From Title,manual:1997-2000
+2000,SAC,Lost 2 Rounds From Title,manual:1997-2000
+2000,WAS,Lost 2 Rounds From Title,manual:1997-2000
+2000,NYL,Lost Finals,manual:1997-2000
+2001,LAS,Champion,nba_api:reconstructed
+2001,NYL,Lost 1 Round From Title,nba_api:reconstructed
+2001,SAC,Lost 1 Round From Title,nba_api:reconstructed
+2001,CLE,Lost 2 Rounds From Title,nba_api:reconstructed
+2001,MIA,Lost 2 Rounds From Title,nba_api:reconstructed
+2001,UTA,Lost 2 Rounds From Title,nba_api:reconstructed
+2001,HOU,Lost 2 Rounds From Title,nba_api:reconstructed
+2001,CHA,Lost Finals,nba_api:reconstructed
+2002,LAS,Champion,nba_api:reconstructed
+2002,WAS,Lost 1 Round From Title,nba_api:reconstructed
+2002,UTA,Lost 1 Round From Title,nba_api:reconstructed
+2002,CHA,Lost 2 Rounds From Title,nba_api:reconstructed
+2002,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2002,HOU,Lost 2 Rounds From Title,nba_api:reconstructed
+2002,IND,Lost 2 Rounds From Title,nba_api:reconstructed
+2002,NYL,Lost Finals,nba_api:reconstructed
+2003,DET,Champion,nba_api:reconstructed
+2003,CON,Lost 1 Round From Title,nba_api:reconstructed
+2003,SAC,Lost 1 Round From Title,nba_api:reconstructed
+2003,CHA,Lost 2 Rounds From Title,nba_api:reconstructed
+2003,MIN,Lost 2 Rounds From Title,nba_api:reconstructed
+2003,CLE,Lost 2 Rounds From Title,nba_api:reconstructed
+2003,HOU,Lost 2 Rounds From Title,nba_api:reconstructed
+2003,LAS,Lost Finals,nba_api:reconstructed
+2004,SEA,Champion,nba_api:reconstructed
+2004,NYL,Lost 1 Round From Title,nba_api:reconstructed
+2004,SAC,Lost 1 Round From Title,nba_api:reconstructed
+2004,DET,Lost 2 Rounds From Title,nba_api:reconstructed
+2004,LAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2004,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2004,MIN,Lost 2 Rounds From Title,nba_api:reconstructed
+2004,CON,Lost Finals,nba_api:reconstructed
+2005,SAC,Champion,nba_api:reconstructed
+2005,HOU,Lost 1 Round From Title,nba_api:reconstructed
+2005,IND,Lost 1 Round From Title,nba_api:reconstructed
+2005,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2005,NYL,Lost 2 Rounds From Title,nba_api:reconstructed
+2005,DET,Lost 2 Rounds From Title,nba_api:reconstructed
+2005,LAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2005,CON,Lost Finals,nba_api:reconstructed
+2006,DET,Champion,nba_api:reconstructed
+2006,CON,Lost 1 Round From Title,nba_api:reconstructed
+2006,LAS,Lost 1 Round From Title,nba_api:reconstructed
+2006,IND,Lost 2 Rounds From Title,nba_api:reconstructed
+2006,HOU,Lost 2 Rounds From Title,nba_api:reconstructed
+2006,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2006,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2006,SAC,Lost Finals,nba_api:reconstructed
+2007,PHO,Champion,nba_api:reconstructed
+2007,IND,Lost 1 Round From Title,nba_api:reconstructed
+2007,SAS,Lost 1 Round From Title,nba_api:reconstructed
+2007,CON,Lost 2 Rounds From Title,nba_api:reconstructed
+2007,SAC,Lost 2 Rounds From Title,nba_api:reconstructed
+2007,NYL,Lost 2 Rounds From Title,nba_api:reconstructed
+2007,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2007,DET,Lost Finals,nba_api:reconstructed
+2008,DET,Champion,nba_api:reconstructed
+2008,NYL,Lost 1 Round From Title,nba_api:reconstructed
+2008,LAS,Lost 1 Round From Title,nba_api:reconstructed
+2008,CON,Lost 2 Rounds From Title,nba_api:reconstructed
+2008,SAC,Lost 2 Rounds From Title,nba_api:reconstructed
+2008,IND,Lost 2 Rounds From Title,nba_api:reconstructed
+2008,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2008,SAS,Lost Finals,nba_api:reconstructed
+2009,PHO,Champion,nba_api:reconstructed
+2009,DET,Lost 1 Round From Title,nba_api:reconstructed
+2009,LAS,Lost 1 Round From Title,nba_api:reconstructed
+2009,ATL,Lost 2 Rounds From Title,nba_api:reconstructed
+2009,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2009,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2009,SAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2009,IND,Lost Finals,nba_api:reconstructed
+2010,SEA,Champion,nba_api:reconstructed
+2010,NYL,Lost 1 Round From Title,nba_api:reconstructed
+2010,PHO,Lost 1 Round From Title,nba_api:reconstructed
+2010,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2010,LAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2010,IND,Lost 2 Rounds From Title,nba_api:reconstructed
+2010,SAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2010,ATL,Lost Finals,nba_api:reconstructed
+2011,MIN,Champion,nba_api:reconstructed
+2011,IND,Lost 1 Round From Title,nba_api:reconstructed
+2011,PHO,Lost 1 Round From Title,nba_api:reconstructed
+2011,NYL,Lost 2 Rounds From Title,nba_api:reconstructed
+2011,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2011,CON,Lost 2 Rounds From Title,nba_api:reconstructed
+2011,SAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2011,ATL,Lost Finals,nba_api:reconstructed
+2012,IND,Champion,nba_api:reconstructed
+2012,CON,Lost 1 Round From Title,nba_api:reconstructed
+2012,LAS,Lost 1 Round From Title,nba_api:reconstructed
+2012,NYL,Lost 2 Rounds From Title,nba_api:reconstructed
+2012,SAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2012,ATL,Lost 2 Rounds From Title,nba_api:reconstructed
+2012,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2012,MIN,Lost Finals,nba_api:reconstructed
+2013,MIN,Champion,nba_api:reconstructed
+2013,PHO,Lost 1 Round From Title,nba_api:reconstructed
+2013,IND,Lost 1 Round From Title,nba_api:reconstructed
+2013,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2013,LAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2013,CHI,Lost 2 Rounds From Title,nba_api:reconstructed
+2013,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2013,ATL,Lost Finals,nba_api:reconstructed
+2014,PHO,Champion,nba_api:reconstructed
+2014,IND,Lost 1 Round From Title,nba_api:reconstructed
+2014,MIN,Lost 1 Round From Title,nba_api:reconstructed
+2014,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2014,SAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2014,ATL,Lost 2 Rounds From Title,nba_api:reconstructed
+2014,LAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2014,CHI,Lost Finals,nba_api:reconstructed
+2015,MIN,Champion,nba_api:reconstructed
+2015,PHO,Lost 1 Round From Title,nba_api:reconstructed
+2015,NYL,Lost 1 Round From Title,nba_api:reconstructed
+2015,CHI,Lost 2 Rounds From Title,nba_api:reconstructed
+2015,TUL,Lost 2 Rounds From Title,nba_api:reconstructed
+2015,LAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2015,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2015,IND,Lost Finals,nba_api:reconstructed
+2016,LAS,Champion,nba_api:reconstructed
+2016,PHO,Lost 1 Round From Title,nba_api:reconstructed
+2016,CHI,Lost 1 Round From Title,nba_api:reconstructed
+2016,ATL,Lost 2 Rounds From Title,nba_api:reconstructed
+2016,NYL,Lost 2 Rounds From Title,nba_api:reconstructed
+2016,SEA,Lost 3 Rounds From Title,nba_api:reconstructed
+2016,IND,Lost 3 Rounds From Title,nba_api:reconstructed
+2016,MIN,Lost Finals,nba_api:reconstructed
+2017,MIN,Champion,nba_api:reconstructed
+2017,WAS,Lost 1 Round From Title,nba_api:reconstructed
+2017,PHO,Lost 1 Round From Title,nba_api:reconstructed
+2017,CON,Lost 2 Rounds From Title,nba_api:reconstructed
+2017,NYL,Lost 2 Rounds From Title,nba_api:reconstructed
+2017,DAL,Lost 3 Rounds From Title,nba_api:reconstructed
+2017,SEA,Lost 3 Rounds From Title,nba_api:reconstructed
+2017,LAS,Lost Finals,nba_api:reconstructed
+2018,SEA,Champion,nba_api:reconstructed
+2018,PHO,Lost 1 Round From Title,nba_api:reconstructed
+2018,ATL,Lost 1 Round From Title,nba_api:reconstructed
+2018,LAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2018,CON,Lost 2 Rounds From Title,nba_api:reconstructed
+2018,DAL,Lost 3 Rounds From Title,nba_api:reconstructed
+2018,MIN,Lost 3 Rounds From Title,nba_api:reconstructed
+2018,WAS,Lost Finals,nba_api:reconstructed
+2019,WAS,Champion,nba_api:reconstructed
+2019,LVA,Lost 1 Round From Title,nba_api:reconstructed
+2019,LAS,Lost 1 Round From Title,nba_api:reconstructed
+2019,CHI,Lost 2 Rounds From Title,nba_api:reconstructed
+2019,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2019,PHO,Lost 3 Rounds From Title,nba_api:reconstructed
+2019,MIN,Lost 3 Rounds From Title,nba_api:reconstructed
+2019,CON,Lost Finals,nba_api:reconstructed
+2020,SEA,Champion,nba_api:reconstructed
+2020,CON,Lost 1 Round From Title,nba_api:reconstructed
+2020,MIN,Lost 1 Round From Title,nba_api:reconstructed
+2020,PHO,Lost 2 Rounds From Title,nba_api:reconstructed
+2020,LAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2020,CHI,Lost 3 Rounds From Title,nba_api:reconstructed
+2020,WAS,Lost 3 Rounds From Title,nba_api:reconstructed
+2020,LVA,Lost Finals,nba_api:reconstructed
+2021,CHI,Champion,nba_api:reconstructed
+2021,CON,Lost 1 Round From Title,nba_api:reconstructed
+2021,LVA,Lost 1 Round From Title,nba_api:reconstructed
+2021,MIN,Lost 2 Rounds From Title,nba_api:reconstructed
+2021,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2021,DAL,Lost 3 Rounds From Title,nba_api:reconstructed
+2021,NYL,Lost 3 Rounds From Title,nba_api:reconstructed
+2021,PHO,Lost Finals,nba_api:reconstructed
+2022,LVA,Champion,nba_api:reconstructed
+2022,CHI,Lost 1 Round From Title,nba_api:reconstructed
+2022,SEA,Lost 1 Round From Title,nba_api:reconstructed
+2022,NYL,Lost 2 Rounds From Title,nba_api:reconstructed
+2022,PHO,Lost 2 Rounds From Title,nba_api:reconstructed
+2022,DAL,Lost 2 Rounds From Title,nba_api:reconstructed
+2022,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2022,CON,Lost Finals,nba_api:reconstructed
+2023,LVA,Champion,nba_api:reconstructed
+2023,CON,Lost 1 Round From Title,nba_api:reconstructed
+2023,DAL,Lost 1 Round From Title,nba_api:reconstructed
+2023,CHI,Lost 2 Rounds From Title,nba_api:reconstructed
+2023,MIN,Lost 2 Rounds From Title,nba_api:reconstructed
+2023,ATL,Lost 2 Rounds From Title,nba_api:reconstructed
+2023,WAS,Lost 2 Rounds From Title,nba_api:reconstructed
+2023,NYL,Lost Finals,nba_api:reconstructed
+2024,NYL,Champion,nba_api:reconstructed
+2024,CON,Lost 1 Round From Title,nba_api:reconstructed
+2024,LVA,Lost 1 Round From Title,nba_api:reconstructed
+2024,ATL,Lost 2 Rounds From Title,nba_api:reconstructed
+2024,IND,Lost 2 Rounds From Title,nba_api:reconstructed
+2024,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2024,PHO,Lost 2 Rounds From Title,nba_api:reconstructed
+2024,MIN,Lost Finals,nba_api:reconstructed
+2025,LVA,Champion,nba_api:reconstructed
+2025,IND,Lost 1 Round From Title,nba_api:reconstructed
+2025,MIN,Lost 1 Round From Title,nba_api:reconstructed
+2025,ATL,Lost 2 Rounds From Title,nba_api:reconstructed
+2025,GSV,Lost 2 Rounds From Title,nba_api:reconstructed
+2025,SEA,Lost 2 Rounds From Title,nba_api:reconstructed
+2025,NYL,Lost 2 Rounds From Title,nba_api:reconstructed
+2025,PHO,Lost Finals,nba_api:reconstructed
