@@ -1,8 +1,10 @@
 """
 app.py
 
-NBA Team Comparison Tool - Streamlit prototype.
-Data sourced from Basketball-Reference.com and Stathead.
+WNBA Team Comparison Tool - Streamlit app.
+Data sourced exclusively from nba_api (stats.wnba.com) via the canonical
+data pipeline in data/processed/WNBA/. No Basketball-Reference/Stathead
+dependency (ToS-restricted; that data stays local-only for the NBA version).
 
 Run with:  streamlit run app.py
 """
@@ -11,17 +13,19 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from data_loader import load_all_data
+from data_loader import load_league_data
 from scoring import (
-    build_full_scoring_table, compute_player_win_shares, compare_two_teams,
-    build_exec_season_wins, build_coach_leaderboard, build_exec_leaderboard,
+    build_full_scoring_table, compute_player_roster_shares, compare_two_teams,
     build_player_leaderboard, build_transparency_panel, apply_era_adjustment,
-    build_multi_coach_season_detail, build_year_over_year_leaderboard, percentile_of,
+    build_year_over_year_leaderboard, percentile_of,
     get_team_display_options, get_season_options_for_team, get_prior_season_row,
-    WEIGHTS, ERA_BOUNDARIES, DATA_CUTOFF_SEASON, STAT_DEFINITIONS
+    normalize_weights, rescore,
+    WEIGHTS, ERA_BOUNDARIES, STAT_DEFINITIONS
 )
 
-st.set_page_config(page_title="NBA Team Jump Comparison", layout="wide")
+LEAGUE = 'WNBA'
+
+st.set_page_config(page_title="WNBA Team Jump Comparison", layout="wide")
 
 COLOR_A = '#1f77b4'
 COLOR_B = '#ff7f0e'
@@ -60,6 +64,18 @@ def render_quartile_badge(value, percentile, fmt="{:.3f}"):
     return render_badge(fmt.format(value), bg, txt)
 
 
+def format_pie_as_pct(df, col='pie'):
+    """Returns a copy with the PIE column converted from a raw share
+    (e.g. 0.082) to a display-ready percentage string (e.g. '8.2%'). PIE is
+    a share of league-wide box-score production, so a percentage reads far
+    more naturally than the raw decimal."""
+    if col not in df.columns:
+        return df
+    df = df.copy()
+    df[col] = df[col].apply(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "")
+    return df
+
+
 def render_delta_badge(current, prior, fmt="{:+.3f}", tolerance=1e-9):
     """Directional badge: green+up-arrow if higher, red+down-arrow if lower,
     yellow+no-arrow if unchanged. Returns a plain string (not HTML) if no
@@ -76,62 +92,34 @@ def render_delta_badge(current, prior, fmt="{:+.3f}", tolerance=1e-9):
     return render_badge(f"{arrow}{fmt.format(diff)}", bg, txt)
 
 
+# ------------------------------------------------------------------
+# CACHED LOAD + BASE SCORING TABLE (built once; weight changes are cheap)
+# ------------------------------------------------------------------
 @st.cache_data
-def get_scored_data(league):
-    data = load_all_data(league)
-    if not data['league_available']:
-        return data, None, None, None
-    exec_season_wins = build_exec_season_wins(data['exec_tenures'], data['team_stats']) if data['exec_tenures'] is not None else pd.DataFrame()
-    scored = build_full_scoring_table(
-        data['team_stats'], data['playoff_results'], data['player_stats'],
-        data['coach_season_wins'], league, data['coach_tenures'], data['coach_awards'],
-        exec_season_wins, data['exec_awards']
+def get_scored_data():
+    team_stats, player_stats, playoff_results = load_league_data(LEAGUE)
+
+    # MOV isn't a stored column - derive it once here (see handoff note).
+    team_stats = team_stats.copy()
+    team_stats['mov'] = (team_stats['pts'] - team_stats['opp_pts']) / team_stats['g']
+
+    # Coaching is dormant for WNBA (no coach data sourced yet) - pass an
+    # empty frame so compute_coaching_score degrades gracefully to a
+    # neutral, non-differentiating value across the board.
+    base_table = build_full_scoring_table(
+        team_stats, playoff_results, player_stats,
+        pd.DataFrame(), LEAGUE
     )
-    ws = compute_player_win_shares(data['player_stats'], data['team_stats'])
-    return data, scored, ws, exec_season_wins
+    player_shares = compute_player_roster_shares(player_stats)
+    return team_stats, player_stats, playoff_results, base_table, player_shares
 
 
-# ------------------------------------------------------------------
-# LEAGUE SELECTION
-# A league whose data/processed/{league}/ folder hasn't been populated yet
-# (pipeline not run for it) shows a coming-soon state rather than crashing -
-# see data_loader.load_all_data's 'league_available' flag.
-# ------------------------------------------------------------------
-st.sidebar.header("League")
-league = st.sidebar.radio("League", ["WNBA", "NBA"], index=0, key="league_select")
+team_stats, player_stats, playoff_results, base_table, player_shares = get_scored_data()
 
-data, scored, ws, exec_season_wins = get_scored_data(league)
-
-if not data['league_available']:
-    st.title("🏀 Team Jump Comparison Tool")
-    st.warning(
-        f"**{league} data isn't loaded yet.** This app expects "
-        f"`data/processed/{league}/team_season_stats.csv` and hasn't found it. "
-        f"Run the data pipeline for {league} (or, for NBA, move the existing "
-        f"Basketball-Reference/Stathead CSVs into that folder) and reload."
-    )
-    st.stop()
-
-if not data.get('coach_data_available', True):
-    st.sidebar.info(
-        f"Coach/exec data isn't sourced yet for {league}. Coaching scores show "
-        "as a neutral placeholder (0.5) for every team - it doesn't affect "
-        "relative ranking within this league, just narrows what the "
-        "composite score can differentiate on."
-    )
-
-# Selectable-population views: a synthetic prior-cutoff-season row may exist
-# in `scored`/`data['team_stats']` (added specifically to power prior-season
-# lookups for the first real season), but must NEVER appear as a pickable
-# option anywhere - dropdowns, leaderboards, season filters all use these
-# filtered versions instead. Prior-season lookups (get_prior_season_row,
-# build_year_over_year_leaderboard) and z-scoring/percentile populations
-# intentionally keep using the FULL `scored`/`ws` so that backing row can
-# still feed comparisons.
-cutoff_season = DATA_CUTOFF_SEASON[league]
-team_stats_selectable = data['team_stats'][data['team_stats']['Season'] >= cutoff_season]
-scored_selectable = scored[scored['Season'] >= cutoff_season]
-ws_selectable_base = ws[ws['Season'] >= cutoff_season]
+# WNBA's first season (1997) is real and fully selectable - unlike the NBA
+# app, there is no hidden "background" season to filter out here.
+team_stats_selectable = team_stats
+ws_selectable_base = player_shares
 
 # Apply any pending team selection staged by a leaderboard "Set as Team A/B"
 # button click, BEFORE the Compare tab's widgets instantiate this run. This
@@ -146,14 +134,43 @@ for slot in ['a', 'b']:
         st.session_state[f'season_{slot}_select'] = pending['season']
 
 # ------------------------------------------------------------------
+# SIDEBAR: user-adjustable composite weights
+# ------------------------------------------------------------------
+DEFAULT_WEIGHTS_PCT = {'quality': 45, 'playoffs': 40, 'roster': 15}
+
+st.sidebar.header("⚖️ Composite Weights")
+st.sidebar.caption("Quality = Massey SRS  •  Playoffs = postseason depth  •  Roster = Σ(PIE × min)")
+for k, v in DEFAULT_WEIGHTS_PCT.items():
+    st.session_state.setdefault(f'w_{k}', v)
+if st.sidebar.button('Reset to default (45 / 40 / 15)'):
+    for k, v in DEFAULT_WEIGHTS_PCT.items():
+        st.session_state[f'w_{k}'] = v
+raw_weights = {
+    k: st.sidebar.slider(k.capitalize(), 0, 100, step=5, key=f'w_{k}')
+    for k in DEFAULT_WEIGHTS_PCT
+}
+norm_weights = normalize_weights(raw_weights)
+st.sidebar.caption(
+    f"In effect: Quality **{norm_weights['quality']:.0%}** / "
+    f"Playoffs **{norm_weights['playoffs']:.0%}** / "
+    f"Roster **{norm_weights['roster']:.0%}**"
+)
+
+# The base table (with weight-independent z-columns) is built once and
+# cached above; only this cheap rescore runs per slider interaction, and it
+# drives every view for the rest of the script.
+scored = rescore(base_table, raw_weights)
+scored_selectable = scored
+
+# ------------------------------------------------------------------
 # HEADER
 # ------------------------------------------------------------------
-earliest_selectable_season = team_stats_selectable['Season'].min()
-st.title(f"🏀 {league} Team Jump Comparison Tool")
+st.title("🏀 WNBA Team Jump Comparison Tool")
 st.caption(
-    f"Compare any two team-seasons ({earliest_selectable_season} to present) across coaching, "
-    "efficiency, roster strength, and playoff performance.  \n"
-    f"**Data sourced via the nba_api pipeline (`league_id`-aware) for {league}.**"
+    "Compare any two team-seasons (1997 to present) across quality, roster strength, "
+    "and playoff performance.  \n"
+    "**Data sourced exclusively from [nba_api](https://github.com/swar/nba_api) "
+    "(stats.wnba.com) — no Basketball-Reference/Stathead dependency.**"
 )
 
 tab_compare, tab_leaderboards, tab_methodology = st.tabs(["⚖️ Compare Teams", "🏆 Leaderboards", "📖 Methodology"])
@@ -172,8 +189,7 @@ def get_landmark_points(df, col):
     interpolated and may not land exactly on any single real observation),
     labeled as such rather than implied to be an exact match.
     """
-    values = (df['Miscellaneous: ORtg'] - df['Miscellaneous: DRtg']) if col is None else df[col]
-    valid = df.assign(_val=values).dropna(subset=['_val'])
+    valid = df.assign(_val=df[col]).dropna(subset=['_val'])
     if len(valid) == 0:
         return []
     stats = [
@@ -187,7 +203,7 @@ def get_landmark_points(df, col):
     for stat_label, stat_val, is_exact in stats:
         closest_idx = (valid['_val'] - stat_val).abs().idxmin()
         closest_row = valid.loc[closest_idx]
-        team_year = f"{closest_row['Team']} {closest_row['Season']}"
+        team_year = f"{closest_row['team_code']} {closest_row['season']}"
         hover = f"{stat_label}: {stat_val:.2f}<br>{team_year}" if is_exact else f"{stat_label}: {stat_val:.2f}<br>Closest: {team_year}"
         points.append({'value': stat_val, 'hover': hover})
     return points
@@ -195,8 +211,9 @@ def get_landmark_points(df, col):
 
 def render_box_whisker_section(metrics, row_a, row_b, label_a, label_b, population_mode, key_prefix):
     """
-    metrics: list of (column_name_or_None, display_label) tuples.
-             column_name=None is handled as Net Rating (computed, not a raw column).
+    metrics: list of (column_name, display_label) tuples - every column is a
+             real column on `scored` (no computed-on-the-fly special case;
+             net_rating is now a direct column like everything else).
     population_mode: "All-time (pooled)" or "Each team's own era"
     Renders an N-column subplot grid (up to 4 per row) with population box
     plots, each team's value marked as a distinct point, and invisible
@@ -210,12 +227,6 @@ def render_box_whisker_section(metrics, row_a, row_b, label_a, label_b, populati
     fig = make_subplots(rows=rows_needed, cols=cols_per_row, subplot_titles=[label for _, label in metrics])
     same_era = row_a['era'] == row_b['era']
 
-    def get_val(row, col):
-        return (row['Miscellaneous: ORtg'] - row['Miscellaneous: DRtg']) if col is None else row[col]
-
-    def get_pop_series(df, col):
-        return (df['Miscellaneous: ORtg'] - df['Miscellaneous: DRtg']) if col is None else df[col]
-
     def add_landmark_markers(fig, pop_df, col, pop_label, r, c):
         points = get_landmark_points(pop_df, col)
         if points:
@@ -228,12 +239,12 @@ def render_box_whisker_section(metrics, row_a, row_b, label_a, label_b, populati
 
     for idx, (col, label) in enumerate(metrics):
         r, c = (idx // cols_per_row) + 1, (idx % cols_per_row) + 1
-        val_a, val_b = get_val(row_a, col), get_val(row_b, col)
+        val_a, val_b = row_a[col], row_b[col]
 
         if population_mode == "All-time (pooled)" or same_era:
             pop_label = "All-time" if population_mode == "All-time (pooled)" else row_a['era']
             pop_df = scored if population_mode == "All-time (pooled)" else scored[scored['era'] == row_a['era']]
-            population = get_pop_series(pop_df, col)
+            population = pop_df[col]
             fig.add_trace(go.Box(y=population, name=pop_label, boxpoints=False, marker_color='lightgray',
                                    showlegend=False, hoverinfo='skip'), row=r, col=c)
             add_landmark_markers(fig, pop_df, col, pop_label, r, c)
@@ -248,8 +259,8 @@ def render_box_whisker_section(metrics, row_a, row_b, label_a, label_b, populati
         else:
             pop_a_df = scored[scored['era'] == row_a['era']]
             pop_b_df = scored[scored['era'] == row_b['era']]
-            fig.add_trace(go.Box(y=get_pop_series(pop_a_df, col), name=row_a['era'], boxpoints=False, marker_color='lightgray', showlegend=False, hoverinfo='skip'), row=r, col=c)
-            fig.add_trace(go.Box(y=get_pop_series(pop_b_df, col), name=row_b['era'], boxpoints=False, marker_color='lightgray', showlegend=False, hoverinfo='skip'), row=r, col=c)
+            fig.add_trace(go.Box(y=pop_a_df[col], name=row_a['era'], boxpoints=False, marker_color='lightgray', showlegend=False, hoverinfo='skip'), row=r, col=c)
+            fig.add_trace(go.Box(y=pop_b_df[col], name=row_b['era'], boxpoints=False, marker_color='lightgray', showlegend=False, hoverinfo='skip'), row=r, col=c)
             add_landmark_markers(fig, pop_a_df, col, row_a['era'], r, c)
             add_landmark_markers(fig, pop_b_df, col, row_b['era'], r, c)
             fig.add_trace(go.Scatter(x=[row_a['era']], y=[val_a], mode='markers', name=label_a,
@@ -309,9 +320,7 @@ def render_send_to_compare_table(df, key_prefix):
             sel_season, sel_team = selected['Season'], selected['Team']
             team_code_to_label = {code: label for label, code in get_team_display_options(team_stats_selectable)}
             team_label = team_code_to_label.get(sel_team, sel_team)
-            season_label = get_exact_season_label(scored, sel_team, sel_season)
-
-            st.info(f"Selected: **{sel_team} {sel_season}** — after clicking below, go to the ⚖️ Compare Teams tab to see it applied (Streamlit can't switch tabs automatically).")
+            season_label = get_exact_season_label(scored_selectable, sel_team, sel_season)
             btn_cols = st.columns(2)
             with btn_cols[0]:
                 if st.button("Set as Team A", key=f"{key_prefix}_set_a"):
@@ -335,28 +344,26 @@ with tab_compare:
 
     col_a, col_b = st.columns(2)
     with col_a:
-        default_team_a = next((label for label, code in team_display_options if code == 'BOS'), team_labels[0])
+        default_team_a = next((label for label, code in team_display_options if code == 'LVA'), team_labels[0])
         team_label_a = st.selectbox("Team A", team_labels, index=team_labels.index(default_team_a), key="team_a_select")
         team_a = team_code_lookup[team_label_a]
         season_options_a = get_season_options_for_team(scored_selectable, team_a)
         season_labels_a = [label for label, season in season_options_a]
         season_lookup_a = dict(season_options_a)
-        default_season_label_a = next((l for l, s in season_options_a if s == cutoff_season), season_labels_a[0])
-        season_label_a = st.selectbox("Season A", season_labels_a, index=season_labels_a.index(default_season_label_a), key="season_a_select")
+        season_label_a = st.selectbox("Season A", season_labels_a, index=0, key="season_a_select")
         season_a = season_lookup_a[season_label_a]
     with col_b:
-        default_team_b = next((label for label, code in team_display_options if code == 'LAL'), team_labels[1] if len(team_labels) > 1 else team_labels[0])
+        default_team_b = next((label for label, code in team_display_options if code == 'NYL'), team_labels[1] if len(team_labels) > 1 else team_labels[0])
         team_label_b = st.selectbox("Team B", team_labels, index=team_labels.index(default_team_b), key="team_b_select")
         team_b = team_code_lookup[team_label_b]
         season_options_b = get_season_options_for_team(scored_selectable, team_b)
         season_labels_b = [label for label, season in season_options_b]
         season_lookup_b = dict(season_options_b)
-        default_season_label_b = next((l for l, s in season_options_b if s == cutoff_season), season_labels_b[0])
-        season_label_b = st.selectbox("Season B", season_labels_b, index=season_labels_b.index(default_season_label_b), key="season_b_select")
+        season_label_b = st.selectbox("Season B", season_labels_b, index=0, key="season_b_select")
         season_b = season_lookup_b[season_label_b]
 
     try:
-        comparison = compare_two_teams(scored, ws, (season_a, team_a), (season_b, team_b))
+        comparison = compare_two_teams(scored, player_shares, (season_a, team_a), (season_b, team_b))
     except ValueError as e:
         st.error(str(e))
         st.stop()
@@ -364,41 +371,30 @@ with tab_compare:
     row_a, row_b = comparison['team_a'], comparison['team_b']
     label_a, label_b = f"{team_a} {season_a}", f"{team_b} {season_b}"
 
-    # --- Era adjustment toggle ---
-    era_labels = [label for _, _, label in ERA_BOUNDARIES[league]]
-    toggle_cols = st.columns([2, 3])
-    with toggle_cols[0]:
-        era_adjust_on = st.toggle("Era-adjust this comparison", value=False)
-    with toggle_cols[1]:
-        default_base_idx = era_labels.index('The Efficiency Explosion')
-        base_era = st.selectbox("Base era (restate both teams in these terms)", era_labels, index=default_base_idx, disabled=not era_adjust_on)
-
-    era_result = None
-    if era_adjust_on:
-        era_result = apply_era_adjustment(scored, row_a, row_b, base_era)
-        st.info(
-            f"📐 Showing **{label_a}** and **{label_b}** restated as if each played in **{base_era}**. "
-            f"SRS, Net Rating, Roster/WS, and Coaching are quantile-mapped from each team's own era "
-            f"onto the equivalent percentile in {base_era}'s distribution. Playoffs is left un-transformed "
-            f"but re-standardized against {base_era}'s own distribution. See the Methodology tab for details."
-        )
+    # --- Era adjustment: HIDDEN for WNBA (single placeholder era; quantile
+    # mapping is an identity transform until the PELT changepoint study is
+    # done). The call-site path is kept intact but permanently unreachable
+    # here, so real era boundaries can be switched on later with no rework.
+    era_adjust_on = False
+    base_era = ERA_BOUNDARIES[LEAGUE][0][2]
+    era_result = apply_era_adjustment(scored, row_a, row_b, base_era) if era_adjust_on else None
 
     st.divider()
 
     # --- Team headers, symmetric layout, with quartile-colored win% and prior-season delta ---
-    win_pct_population = scored['W/L%']
+    win_pct_population = scored['w_pct']
 
     def render_record_block(row, season, team):
-        current_pctile = percentile_of(row['W/L%'], win_pct_population)
-        st.metric("Record", f"{int(row['W'])}-{int(row['L'])}", help="Wins-Losses")
-        st.markdown(f"Win% {render_quartile_badge(row['W/L%'], current_pctile)}", unsafe_allow_html=True)
+        current_pctile = percentile_of(row['w_pct'], win_pct_population)
+        st.metric("Record", f"{int(row['w'])}-{int(row['l'])}", help="Wins-Losses")
+        st.markdown(f"Win% {render_quartile_badge(row['w_pct'], current_pctile)}", unsafe_allow_html=True)
 
         prior_row = get_prior_season_row(scored, season, team)
         if prior_row is not None:
-            prior_pctile = percentile_of(prior_row['W/L%'], win_pct_population)
-            st.caption(f"Prior season ({prior_row['Team']} {prior_row['Season']}): {int(prior_row['W'])}-{int(prior_row['L'])}")
-            st.markdown(f"<span style='font-size:0.85em;'>Prior Win% {render_quartile_badge(prior_row['W/L%'], prior_pctile)}</span>", unsafe_allow_html=True)
-            delta_badge = render_delta_badge(row['W/L%'], prior_row['W/L%'])
+            prior_pctile = percentile_of(prior_row['w_pct'], win_pct_population)
+            st.caption(f"Prior season ({prior_row['team_code']} {prior_row['season']}): {int(prior_row['w'])}-{int(prior_row['l'])}")
+            st.markdown(f"<span style='font-size:0.85em;'>Prior Win% {render_quartile_badge(prior_row['w_pct'], prior_pctile)}</span>", unsafe_allow_html=True)
+            delta_badge = render_delta_badge(row['w_pct'], prior_row['w_pct'])
             st.markdown(f"Change: {delta_badge}", unsafe_allow_html=True)
         else:
             st.caption("No prior-season record available for comparison.")
@@ -419,120 +415,109 @@ with tab_compare:
 
     # --- COMPOSITE SCORE: prominent, quartile-colored percentile, prior-score comparison ---
     st.subheader("Composite Score & Rankings")
-    if era_adjust_on:
-        winner_is_a = era_result['overall_winner'] == 'A'
-        score_a, score_b = era_result['composite_a'], era_result['composite_b']
-    else:
-        winner_is_a = row_a['composite_score'] > row_b['composite_score']
-        score_a, score_b = row_a['composite_score'], row_b['composite_score']
+    winner_is_a = row_a['composite_score'] > row_b['composite_score']
+    score_a, score_b = row_a['composite_score'], row_b['composite_score']
 
     winner_label = label_a if winner_is_a else label_b
-    st.success(f"🏆 **Overall Composite Winner: {winner_label}**" + (f" (era-adjusted to {base_era})" if era_adjust_on else ""))
+    st.success(f"🏆 **Overall Composite Winner: {winner_label}**")
 
     score_cols = st.columns(2)
     for col, (label, row, score, season, team) in zip(score_cols, [(label_a, row_a, score_a, season_a, team_a), (label_b, row_b, score_b, season_b, team_b)]):
         with col:
             st.markdown(f"**{label} — Composite Score**")
             st.markdown(f"<span style='font-size:1.6em; font-weight:bold;'>{score:.3f}</span>", unsafe_allow_html=True)
-            if not era_adjust_on:
-                pctile = percentile_of(score, scored['composite_score'])
-                st.markdown(render_quartile_badge(score, pctile), unsafe_allow_html=True)
+            pctile = percentile_of(score, scored['composite_score'])
+            st.markdown(render_quartile_badge(score, pctile), unsafe_allow_html=True)
 
-                prior_row = get_prior_season_row(scored, season, team)
-                if prior_row is not None:
-                    prior_pctile = percentile_of(prior_row['composite_score'], scored['composite_score'])
-                    st.markdown(
-                        f"Prior ({prior_row['Season']}): <span style='font-size:0.85em;'>{prior_row['composite_score']:.3f} "
-                        f"{render_quartile_badge(prior_row['composite_score'], prior_pctile)}</span>",
-                        unsafe_allow_html=True
-                    )
-                    delta_badge = render_delta_badge(score, prior_row['composite_score'])
-                    st.markdown(f"Change: {delta_badge}", unsafe_allow_html=True)
-                else:
-                    st.caption("No prior-season composite score available (predates our scored data).")
+            prior_row = get_prior_season_row(scored, season, team)
+            if prior_row is not None:
+                prior_pctile = percentile_of(prior_row['composite_score'], scored['composite_score'])
+                st.markdown(
+                    f"Prior ({prior_row['season']}): <span style='font-size:0.85em;'>{prior_row['composite_score']:.3f} "
+                    f"{render_quartile_badge(prior_row['composite_score'], prior_pctile)}</span>",
+                    unsafe_allow_html=True
+                )
+                delta_badge = render_delta_badge(score, prior_row['composite_score'])
+                st.markdown(f"Change: {delta_badge}", unsafe_allow_html=True)
+            else:
+                st.caption("No prior-season composite score available (first season in our data, or an expansion team).")
 
-                rank_cols = st.columns(3)
-                with rank_cols[0]:
-                    st.metric("All-Time Rank (1980+)", f"{row['all_time_rank']}/{row['all_time_total']}")
-                with rank_cols[1]:
-                    st.metric("Era Rank", f"{row['era_rank']}/{row['era_total']}")
-                with rank_cols[2]:
-                    st.metric("Season Rank", f"{row['season_rank']}/{row['season_total']}")
+            rank_cols = st.columns(3)
+            with rank_cols[0]:
+                st.metric("All-Time Rank", f"{row['all_time_rank']}/{row['all_time_total']}")
+            with rank_cols[1]:
+                st.metric("Era Rank", f"{row['era_rank']}/{row['era_total']}")
+            with rank_cols[2]:
+                st.metric("Season Rank", f"{row['season_rank']}/{row['season_total']}")
 
     st.divider()
 
-    # --- SCORED CATEGORIES: box-and-whisker (replaces old list + redundant bar chart) ---
+    # --- SCORED CATEGORIES: box-and-whisker (Quality + Roster; Playoffs shown separately) ---
     st.subheader("Scored Categories")
     scored_pop_mode = st.radio("Population", ["All-time (pooled)", "Each team's own era"], horizontal=True, key="scored_pop_mode")
 
-    if era_adjust_on:
-        st.caption("Showing era-adjusted values (quantile-mapped to " + base_era + ")")
-        adj_metrics = ['SRS', 'Net Rating', 'Roster (Win Shares)', 'Coaching']
-        cols = st.columns(4)
-        for i, m in enumerate(adj_metrics):
-            with cols[i]:
-                edge = era_result['edges'][m]
-                marker_a = "🏆 " if edge == 'A' else ""
-                marker_b = "🏆 " if edge == 'B' else ""
-                st.markdown(f"**{m}**")
-                st.write(f"{marker_a}{label_a}: {era_result['adjusted_a'][m]:.2f}")
-                st.write(f"{marker_b}{label_b}: {era_result['adjusted_b'][m]:.2f}")
-                st.caption(STAT_DEFINITIONS.get(m, ""))
-    else:
-        scored_metrics = [('Miscellaneous: SRS', 'SRS'), (None, 'Net Rating'), ('team_total_ws', 'Roster (Win Shares)'), ('coaching_score', 'Coaching')]
-        render_box_whisker_section(scored_metrics, row_a, row_b, label_a, label_b, scored_pop_mode, key_prefix="scored")
+    scored_metrics = [('srs', 'SRS'), ('roster_strength', 'Roster')]
+    render_box_whisker_section(scored_metrics, row_a, row_b, label_a, label_b, scored_pop_mode, key_prefix="scored")
 
-        # Playoffs shown separately - a 6-point ordinal doesn't box-plot meaningfully
-        st.markdown("**Playoffs**")
-        pcol1, pcol2 = st.columns(2)
+    # Playoffs shown separately - a 6-point ordinal doesn't box-plot meaningfully
+    st.markdown("**Playoffs**")
+    pcol1, pcol2 = st.columns(2)
 
-        def playoff_display(row):
-            if row['playoff_status'] == 'missed':
-                return 'Missed'
-            elif row['playoff_status'] == 'ambiguous':
-                return 'Unresolved (1980-83 bye-era gap)'
-            return row['playoff_round_reached']
+    def playoff_display(row):
+        if row['playoff_status'] == 'missed':
+            return 'Missed'
+        elif row['playoff_status'] == 'ambiguous':
+            return 'Unresolved (data gap)'
+        return row['playoff_round_reached']
 
-        with pcol1:
-            marker = "🏆 " if comparison['edges']['Playoffs'] == 'A' else ""
-            st.write(f"{marker}{label_a}: **{playoff_display(row_a)}**")
-        with pcol2:
-            marker = "🏆 " if comparison['edges']['Playoffs'] == 'B' else ""
-            st.write(f"{marker}{label_b}: **{playoff_display(row_b)}**")
-        st.caption(STAT_DEFINITIONS['Playoffs'])
+    with pcol1:
+        marker = "🏆 " if comparison['edges']['Playoffs'] == 'A' else ""
+        st.write(f"{marker}{label_a}: **{playoff_display(row_a)}**")
+    with pcol2:
+        marker = "🏆 " if comparison['edges']['Playoffs'] == 'B' else ""
+        st.write(f"{marker}{label_b}: **{playoff_display(row_b)}**")
+    st.caption(STAT_DEFINITIONS['Playoffs'])
 
     st.divider()
 
-    # --- FOUR FACTORS: box-and-whisker (existing, kept) ---
+    # --- FOUR FACTORS: box-and-whisker (display-only, not part of the composite) ---
     st.subheader("Four Factors")
     st.caption("Click a legend entry to show/hide that trace - this is Plotly's built-in interactive legend, not a separate app control.")
     ff_pop_mode = st.radio("Population for Four Factors", ["All-time (pooled)", "Each team's own era"], horizontal=True, key="ff_pop_mode")
-    four_factors = [('Team Shooting: eFG%', 'eFG%'), ('Team: TOV%', 'TOV%'), ('Team: ORB%', 'ORB%'), ('Team: FTr', 'FTr')]
+    four_factors = [('efg_pct', 'eFG%'), ('tov_pct', 'TOV%'), ('orb_pct', 'ORB%'), ('ft_rate', 'FTr')]
     render_box_whisker_section(four_factors, row_a, row_b, label_a, label_b, ff_pop_mode, key_prefix="fourfactors")
 
     st.divider()
 
-    # --- ADDITIONAL ADVANCED METRICS: box-and-whisker (replaces "Additional Context") ---
+    # --- ADDITIONAL ADVANCED METRICS: box-and-whisker (context, not scored) ---
     st.subheader("Additional Advanced Metrics")
     st.caption("Context beyond the scored categories - not part of the composite score.")
     adv_pop_mode = st.radio("Population for Additional Metrics", ["All-time (pooled)", "Each team's own era"], horizontal=True, key="adv_pop_mode")
     additional_metrics = [
-        ('Miscellaneous: Pace', 'Pace'), ('Miscellaneous: ORtg', 'ORtg'), ('Miscellaneous: DRtg', 'DRtg'),
-        ('Team Shooting: TS%', 'TS%'), ('Miscellaneous: MOV', 'MOV'), ('Miscellaneous: SOS', 'SOS'),
+        ('pace', 'Pace'), ('off_rating', 'ORtg'), ('def_rating', 'DRtg'),
+        ('ts_pct', 'TS%'), ('net_rating', 'Net Rating'), ('mov', 'MOV'), ('sos', 'SOS'),
     ]
     render_box_whisker_section(additional_metrics, row_a, row_b, label_a, label_b, adv_pop_mode, key_prefix="advanced")
 
     st.divider()
 
     # --- What Changed ---
+    WHATS_CHANGED_MIN_MINUTES = 300
     st.subheader("What Changed (vs. the prior season)")
-    st.caption("Additions/losses (by minutes), plus coach/exec changes. eFG% and USG% shown alongside MP/WS to help identify not just WHO changed but WHY it mattered - eFG% for shooting efficiency, USG% for role/impact size. TS% and TOV% omitted to keep the table scannable (see the Roster Contribution section's rationale below for why eFG%+USG% over eFG%+TS%).")
+    st.caption(
+        f"Additions/losses (by minutes), filtered to players with {WHATS_CHANGED_MIN_MINUTES}+ minutes "
+        "on the relevant side of the comparison, so end-of-bench/garbage-time roster churn doesn't crowd "
+        "out the moves that actually mattered. WS/PIE/USG% shown alongside to help identify not just WHO "
+        "changed but WHY it mattered - WS for win value, PIE for outcome-agnostic footprint, USG% for "
+        "role/impact size."
+    )
     change_cols = st.columns(2)
     for col, (season, team, label) in zip(change_cols, [(season_a, team_a, label_a), (season_b, team_b, label_b)]):
         with col:
             st.markdown(f"**{label}**")
-            panel = build_transparency_panel(scored, data['player_stats'], exec_season_wins, season, team,
-                                               coach_tenures=data['coach_tenures'], exec_tenures=data['exec_tenures'])
+            panel = build_transparency_panel(scored, player_stats, pd.DataFrame(), season, team,
+                                               coach_tenures=None, exec_tenures=None,
+                                               min_minutes=WHATS_CHANGED_MIN_MINUTES)
             if not panel['has_prior_data']:
                 st.info("No prior-season data available - likely an expansion franchise's first season.")
                 continue
@@ -540,127 +525,86 @@ with tab_compare:
             prior_label = f"{panel['prior_team']} {panel['prior_season']}"
             st.caption(f"Compared to {prior_label}" + (" (bridged relocation/rename)" if panel['is_relocation_year'] else ""))
 
-            if panel['coach_changed'] is None:
-                st.write(f"Coach: {panel.get('coach_current') or 'unknown'} (prior unknown)")
-            elif panel['coach_changed']:
-                st.warning(f"🔄 Coach changed: {panel['coach_prior']} → {panel['coach_current']}")
-            else:
-                st.write(f"Coach: {panel['coach_current']} (unchanged)")
-
-            if panel['exec_changed'] is None:
-                st.write("Exec: no data available")
-            elif panel['exec_changed']:
-                st.warning(f"🔄 Exec changed: {panel['exec_prior']} → {panel['exec_current']}")
-            else:
-                st.write(f"Exec: {panel['exec_current']} (unchanged)")
-
             if not panel.get('player_data_available_for_prior', True):
                 st.caption("ℹ️ No player-level data exists yet for the prior season.")
             else:
+                display_cols = {'player_name': 'Player', 'min': 'Min', 'ws': 'WS', 'pie': 'PIE', 'usg_pct': 'USG%'}
                 st.markdown("**Key additions**")
                 if len(panel['players_added']):
-                    st.dataframe(panel['players_added'].rename(columns={'MP': 'Minutes', 'WS': 'Win Shares'}), hide_index=True, use_container_width=True)
+                    st.dataframe(format_pie_as_pct(panel['players_added']).rename(columns=display_cols), hide_index=True, use_container_width=True)
                 else:
                     st.write("_None_")
                 st.markdown("**Key losses**")
                 if len(panel['players_lost']):
-                    st.dataframe(panel['players_lost'].rename(columns={'MP': 'Minutes', 'WS': 'Win Shares'}), hide_index=True, use_container_width=True)
+                    st.dataframe(format_pie_as_pct(panel['players_lost']).rename(columns=display_cols), hide_index=True, use_container_width=True)
                 else:
                     st.write("_None_")
 
     with st.expander("What do these mean?"):
-        for stat in ['MP', 'WS', 'eFG%', 'USG%']:
+        for stat in ['MP', 'WS', 'PIE', 'USG%']:
             st.markdown(f"**{stat}**: {STAT_DEFINITIONS.get(stat, 'No definition available.')}")
 
     st.divider()
 
     # --- Roster Contribution ---
-    st.subheader("Roster Contribution (Win Shares → % of team wins)")
-    st.caption("eFG% and USG% shown alongside WS - efficiency and role size, the two dimensions behind a player's contribution. Blank % of team wins means that row is a multi-team combined season (a player traded mid-year) - the metric isn't meaningful for a blended team label, so it's left blank rather than shown as a misleading number.")
-    roster_cols_list = ['Player', 'MP', 'WS', 'eFG%', 'USG%', 'pct_of_team_wins']
+    st.subheader("Roster Contribution (PIE × minutes, and Win Shares → % of team wins)")
+    st.caption(
+        "Shows every rotation player (300+ minutes) on the roster, sorted by Win Shares. "
+        "PIE and WS surface side by side - footprint (PIE) vs. win-translation (WS); the gap between "
+        "the two is itself informative. A high-minutes, high-usage player can still land near the bottom "
+        "of this list with negative WS - that's Win Shares correctly penalizing low-efficiency volume, "
+        "not a data gap, and it's exactly the kind of disagreement PIE vs. WS is meant to surface. "
+        "Blank '% of team wins' means that row is a multi-team combined season (a player traded mid-year) "
+        "- the metric isn't meaningful for a blended team label, so it's left blank rather than shown as "
+        "a misleading number."
+    )
+    roster_cols_list = ['player_name', 'min', 'ws', 'pie', 'pct_of_team_ws']
+    roster_display_names = {'player_name': 'Player', 'min': 'Min', 'ws': 'WS', 'pie': 'PIE', 'pct_of_team_ws': '% of team wins'}
     roster_cols = st.columns(2)
     with roster_cols[0]:
         st.markdown(f"**{label_a}**")
-        st.dataframe(comparison['roster_a'][roster_cols_list].rename(columns={'pct_of_team_wins': '% of team wins'}), hide_index=True, use_container_width=True)
+        cols_present_a = [c for c in roster_cols_list if c in comparison['roster_a'].columns]
+        st.dataframe(format_pie_as_pct(comparison['roster_a'][cols_present_a]).rename(columns=roster_display_names), hide_index=True, use_container_width=True)
     with roster_cols[1]:
         st.markdown(f"**{label_b}**")
-        st.dataframe(comparison['roster_b'][roster_cols_list].rename(columns={'pct_of_team_wins': '% of team wins'}), hide_index=True, use_container_width=True)
+        cols_present_b = [c for c in roster_cols_list if c in comparison['roster_b'].columns]
+        st.dataframe(format_pie_as_pct(comparison['roster_b'][cols_present_b]).rename(columns=roster_display_names), hide_index=True, use_container_width=True)
     with st.expander("What do these mean?"):
-        for stat in ['MP', 'WS', 'eFG%', 'USG%', '% of team wins']:
+        for stat in ['WS', 'PIE', '% of team wins']:
             st.markdown(f"**{stat}**: {STAT_DEFINITIONS.get(stat, 'No definition available.')}")
 
-    st.divider()
-
-    # --- Coach & Executive (moved below What Changed / Roster, per request) ---
-    st.subheader("Coach & Executive")
-    coach_exec_cols = st.columns(2)
-    for col, (season, team, row) in zip(coach_exec_cols, [(season_a, team_a, row_a), (season_b, team_b, row_b)]):
-        with col:
-            st.markdown(f"**{team} {season}**")
-            if row.get('multi_coach_season'):
-                st.warning("⚠️ More than one coach this season - showing all")
-                detail = build_multi_coach_season_detail(scored, data['coach_tenures'], data['coach_season_wins'], data['coach_awards'], season, team, league)
-                for c in detail:
-                    pct_str = f"{c['pct_of_season']}% of games" if c['pct_of_season'] is not None else "split not derivable from data"
-                    award_badge = " 🏆 COY" if c['won_award_this_season'] else ""
-                    pctile = percentile_of(c['coaching_score'], scored['coaching_score'])
-                    st.write(f"**{c['coach']}**{award_badge} — {pct_str}")
-                    st.caption(f"Score: {round(c['coaching_score'],3)} ({pctile}th percentile of all team-seasons)")
-            else:
-                pre1980_note = " (incl. pre-1980 tenure data)" if row.get('used_pre_cutoff_tenure_data') else ""
-                coach_note = f" ⚠️ {row['note']}" if pd.notna(row.get('note')) else ""
-                award_badge = " 🏆 COY" if row.get('won_award_this_season_coach') else ""
-                pctile = percentile_of(row['coaching_score'], scored['coaching_score'])
-                st.write(f"**Coach: {row['coach_name']}**{award_badge}{pre1980_note}{coach_note}")
-                st.caption(f"Score: {round(row['coaching_score'],3)} ({pctile}th percentile) — {STAT_DEFINITIONS['Coaching']}")
-
-            st.write("")
-            if pd.notna(row.get('exec_name')):
-                exec_award = " 🏆 EOY" if row.get('won_award_this_season') else ""
-                exec_pctile = percentile_of(row['exec_score'], scored['exec_score']) if pd.notna(row.get('exec_score')) else None
-                st.write(f"**Exec: {row['exec_name']}**{exec_award}")
-                if exec_pctile is not None:
-                    st.caption(f"Score: {round(row['exec_score'],3)} ({exec_pctile}th percentile) — display-only, not part of the composite")
-                else:
-                    st.caption("Score not available")
-            else:
-                st.write("**Exec:** no data available")
-
-    st.caption("⚠️ Coaching and executive scoring formulas are early-stage and flagged internally for further review/tuning - treat scores as directional, not final.")
+    # NOTE: Coach & Executive panel is DORMANT for WNBA (no coach/exec data
+    # sourced yet) - intentionally not rendered. Flagged as separate future
+    # work (see Methodology tab).
 
 
 # ====================================================================
 # TAB 2: LEADERBOARDS
 # ====================================================================
 with tab_leaderboards:
-    lb_team, lb_yoy, lb_player, lb_coach, lb_exec = st.tabs(["Teams", "Year-over-Year Changes", "Players", "Coaches", "Executives"])
+    lb_team, lb_yoy, lb_player, lb_coach_exec = st.tabs(["Teams", "Year-over-Year Changes", "Players", "Coaches & Executives"])
 
     with lb_team:
         st.subheader("All-Time Team Leaderboard")
-        filter_cols = st.columns(2)
-        with filter_cols[0]:
-            season_filter = st.selectbox("Filter to a single season (optional)", ["All seasons"] + sorted(team_stats_selectable['Season'].unique(), reverse=True), key="team_lb_filter")
-        with filter_cols[1]:
-            era_filter = st.selectbox("Filter to an era (optional)", ["All eras"] + [label for _, _, label in ERA_BOUNDARIES[league]], key="team_lb_era_filter")
+        season_filter = st.selectbox("Filter to a single season (optional)", ["All seasons"] + sorted(team_stats_selectable['season'].unique(), reverse=True), key="team_lb_filter")
 
-        display_df = scored_selectable[['all_time_rank', 'season_rank', 'Season', 'era', 'Team', 'W', 'L', 'composite_score',
-                              'Miscellaneous: SRS', 'playoff_status', 'playoff_round_reached', 'coach_name']].copy()
+        display_df = scored_selectable[['all_time_rank', 'season_rank', 'season', 'era', 'team_code', 'w', 'l', 'composite_score',
+                              'srs', 'playoff_status', 'playoff_round_reached']].copy()
         display_df['Playoff Result'] = display_df.apply(
             lambda r: 'Missed' if r['playoff_status'] == 'missed'
-            else ('Unresolved (1980-83 gap)' if r['playoff_status'] == 'ambiguous' else r['playoff_round_reached']),
+            else ('Unresolved (data gap)' if r['playoff_status'] == 'ambiguous' else r['playoff_round_reached']),
             axis=1
         )
         display_df = display_df.drop(columns=['playoff_status', 'playoff_round_reached'])
         display_df = display_df.rename(columns={
-            'Miscellaneous: SRS': 'SRS', 'composite_score': 'Composite Score', 'coach_name': 'Coach',
-            'all_time_rank': 'All-Time Rank (1980+)', 'season_rank': 'Season Rank', 'era': 'Era'
+            'srs': 'SRS', 'composite_score': 'Composite Score',
+            'all_time_rank': 'All-Time Rank', 'season_rank': 'Season Rank', 'era': 'Era',
+            'season': 'Season', 'team_code': 'Team', 'w': 'W', 'l': 'L',
         })
         display_df['Composite Score'] = display_df['Composite Score'].round(3)
         if season_filter != "All seasons":
             display_df = display_df[display_df['Season'] == season_filter]
-        if era_filter != "All eras":
-            display_df = display_df[display_df['Era'] == era_filter]
-        display_df = display_df.sort_values('All-Time Rank (1980+)').reset_index(drop=True)
+        display_df = display_df.sort_values('All-Time Rank').reset_index(drop=True)
         render_send_to_compare_table(display_df, key_prefix="team_lb")
 
     with lb_yoy:
@@ -668,44 +612,41 @@ with tab_leaderboards:
         st.caption(
             "Every team-season compared to its immediately prior season (bridging relocations/renames). "
             "Sort by any column to find the biggest jumps or collapses - this is the direct analytical "
-            "payoff of the project's original 'which teams made a big jump' premise. "
-            "⚠️ Win Change can be misleading across lockout-shortened seasons (1998-99, 2011-12, 2019-20) "
-            "since games played differs - Composite Score Change (built from rate stats) is more reliable there."
+            "payoff of the project's original 'which teams made a big jump' premise."
         )
         yoy_lb = build_year_over_year_leaderboard(scored)
+        yoy_lb = yoy_lb.rename(columns={
+            'season': 'Season', 'team_code': 'Team', 'prior_season': 'Prior Season',
+            'composite_change': 'Composite Score Change', 'win_change': 'Win Change',
+            'quality_change': 'Quality (SRS) Change', 'net_rating_change': 'Net Rating Change',
+            'pace_change': 'Pace Change', 'ts_pct_change': 'TS% Change', 'roster_change': 'Roster Change',
+        })
         direction = st.radio("Show", ["Biggest jumps first", "Biggest collapses first"], horizontal=True, key="yoy_direction")
         yoy_display = yoy_lb.sort_values('Composite Score Change', ascending=(direction == "Biggest collapses first")).reset_index(drop=True)
         render_send_to_compare_table(yoy_display, key_prefix="yoy_lb")
 
     with lb_player:
         st.subheader("Player-Season Leaderboard")
-        st.caption("Ranked by Win Shares. '% of team wins' is that player's renormalized share of their team's actual win total.")
-        player_season_filter = st.selectbox("Filter to a single season", ["All seasons"] + sorted(scored_selectable['Season'].unique(), reverse=True), key="player_lb_filter")
-        # restrict to the selectable population (1979-80+) - ws itself carries
-        # 1978-79 rows too (needed by the transparency panel's roster diff),
-        # but that season should never surface on a user-facing leaderboard
-        ws_selectable = ws[ws['Season'].isin(scored_selectable['Season'].unique())]
-        player_lb = build_player_leaderboard(ws_selectable, player_season_filter)
+        st.caption("Ranked by Win Shares. '% of team' columns are each player's renormalized share of their team's positive-impact pool (PIE-based footprint and WS-based win-translation, shown side by side).")
+        player_season_filter = st.selectbox("Filter to a single season", ["All seasons"] + sorted(scored_selectable['season'].unique(), reverse=True), key="player_lb_filter")
+        player_lb = build_player_leaderboard(player_shares, player_season_filter)
+        player_lb = format_pie_as_pct(player_lb)
+        player_lb = player_lb.rename(columns={
+            'player_name': 'Player', 'season': 'Season', 'team_code': 'Team', 'age': 'Age', 'min': 'Min',
+            'ws': 'WS', 'ows': 'OWS', 'dws': 'DWS', 'pie': 'PIE', 'player_impact': 'Impact (PIE×Min)',
+            'pct_of_team': '% of team (PIE)', 'pct_of_team_ws': '% of team (WS)',
+        })
         st.dataframe(player_lb, hide_index=True, use_container_width=True, height=550)
 
-    with lb_coach:
-        st.subheader("Coach Career Leaderboard")
-        if data.get('coach_data_available', True):
-            cutoff_label = DATA_CUTOFF_SEASON[league].split('-')[0]
-            st.caption(f"W/L shown as TWO separate figures: {cutoff_label}-onward-only (what our season-level data directly covers) and all-time (adding pre-{cutoff_label} tenure aggregates where available) - shown explicitly rather than blended, so it's never ambiguous which era's wins are being counted.")
-            coach_lb = build_coach_leaderboard(data['coach_season_wins'], data['coach_tenures'], league, data['coach_awards'])
-            st.dataframe(coach_lb, hide_index=True, use_container_width=True, height=550)
-        else:
-            st.info(f"No coach data sourced yet for {league}.")
-
-    with lb_exec:
-        st.subheader("Executive Career Leaderboard")
-        st.caption("Executives are NOT part of the scored composite. Win totals are a proxy (the real record of whichever team they led), 1980+ only - no pre-1980 fallback exists for execs since source data has no win/loss at all before that.")
-        if len(exec_season_wins):
-            exec_lb = build_exec_leaderboard(exec_season_wins, data['exec_awards'])
-            st.dataframe(exec_lb, hide_index=True, use_container_width=True, height=550)
-        else:
-            st.info("No executive data loaded.")
+    with lb_coach_exec:
+        st.subheader("Coaches & Executives")
+        st.info(
+            "🚧 Not yet sourced for the WNBA. Coach and executive data is flagged as a "
+            "separate future work chunk (a distinct mode of manual lookup and entry, "
+            "unlike the automated nba_api pipeline that powers everything else in this "
+            "app) - this tab will populate once that data exists, with no other changes "
+            "needed elsewhere in the app."
+        )
 
 
 # ====================================================================
@@ -714,111 +655,93 @@ with tab_leaderboards:
 with tab_methodology:
     st.header("How the scoring works")
 
-    st.markdown("""
-    The composite score blends **five categories**, each standardized (z-scored) across **1,336 team-seasons**
-    (1978-79 through present - see the note below on why 1978-79 is one season wider than what's actually
-    selectable) before weighting, so a team's performance is measured relative to the full population
-    rather than on raw, era-dependent units. **1,314 of those (1979-80 onward) are user-selectable** -
-    everything you can pick in a dropdown, every leaderboard row, every ranking is drawn from that subset.
+    st.markdown(f"""
+    The composite score blends **three categories**, each standardized (z-scored) across all
+    **{len(scored)} team-seasons** (1997 through present) before weighting, so a team's performance
+    is measured relative to the full WNBA population rather than on raw units. Every season is
+    user-selectable - there's no hidden "background" season the way the NBA version needs one for
+    prior-season bridging at its 1979-80 data floor, since 1997 is genuinely the WNBA's first season.
     """)
 
     st.subheader("Category weights")
+    st.caption("Defaults shown below. Every value is user-adjustable via the sidebar sliders, which recompute the composite live.")
     weight_df = pd.DataFrame([
-        {"Category": "SRS (Simple Rating System)", "Weight": f"{WEIGHTS['srs']:.0%}",
-         "Why": "Best single 'how good were they' number - point differential adjusted for strength of schedule."},
-        {"Category": "Net Rating", "Weight": f"{WEIGHTS['net_rating']:.0%}",
-         "Why": "ORtg - DRtg. Correlated with SRS by design - kept separate so agreement/disagreement is itself informative."},
-        {"Category": "Playoffs", "Weight": f"{WEIGHTS['playoffs']:.0%}",
-         "Why": "Ordinal scale (0=missed, 5=champion). Weighted lower deliberately since playoff results are noisier/smaller-sample than a full season."},
-        {"Category": "Roster / Win Shares", "Weight": f"{WEIGHTS['roster_ws']:.0%}", "Why": "Sum of the roster's Win Shares - the personnel-strength signal."},
-        {"Category": "Coaching", "Weight": f"{WEIGHTS['coaching']:.0%}", "Why": "Built from the coach's 'at the time' record - see below."},
+        {"Category": "Quality (Massey SRS)", "Default Weight": f"{WEIGHTS['quality']:.0%}",
+         "Why": "Schedule-adjusted point differential, solved simultaneously over the whole season's game graph. Best single 'how good were they' number."},
+        {"Category": "Playoffs", "Default Weight": f"{WEIGHTS['playoffs']:.0%}",
+         "Why": "Depth-honest ordinal scale (0=missed, 5=champion). The one genuinely semi-independent axis (~0.79 correlated with Quality), so it carries real weight."},
+        {"Category": "Roster (Σ PIE × min)", "Default Weight": f"{WEIGHTS['roster']:.0%}",
+         "Why": "Personnel-strength signal. Kept light (~0.85 correlated with Quality) since it's largely re-stating the same underlying team strength."},
     ])
     st.table(weight_df)
 
-    st.subheader("Coaching sub-score formula")
-    st.code("coaching_score = 0.55 * prior_win_pct_shrunk + 0.25 * experience_normalized + 0.20 * accolade_score", language="python")
+    st.subheader("Why only three axes (signal independence, not coverage)")
     st.markdown("""
-    - **`prior_win_pct_shrunk`**: win% from ALL seasons strictly *before* the evaluated season, shrunk toward
-      league-average (0.5) via Bayesian credibility weighting: `weight = games / (games + 41)`.
-    - **`experience_normalized`**: prior seasons coached (any team), capped at 15 for full credit.
-    - **`accolade_score`**: prior Coach of the Year awards, capped at 2 for full credit.
-    - **Known gap**: playoff coaching record isn't yet folded in - regular season only, for now.
+    An earlier draft carried SRS and Net Rating as two separate weighted categories. Empirically,
+    `corr(srs, net_rating) = 0.992` - scoring both was counting the same signal twice under different
+    names, at half the composite. They're collapsed into one **Quality** axis (Massey SRS, with a
+    `net_rating` fallback for the rare team-season without a game-log-derived rating).
+
+    **Coaching was removed from the composite entirely** - two independent reasons, not one:
+    a prior-record coaching score is itself correlated with team quality (re-importing the same
+    signal a third time), and an award-based component necessarily scores a team the season
+    *after* the recognition was earned (a lag artifact). There's also no WNBA coach data sourced
+    yet regardless (see the Leaderboards tab), so coaching is fully dormant rather than
+    partially-scored.
+
+    **Roster strength and win percentage were both evaluated and ruled out** as separate scored
+    categories - both cross-correlate 0.83-1.00 with `net_rating`, meaning they re-import the
+    Quality signal under a different name rather than adding independent information. Roster
+    survives as a *light-weight* category specifically because, even at 0.85 correlated, it's
+    still meaningfully less redundant than the other candidates were.
     """)
 
-    st.subheader("Executive scoring (display-only, NOT part of the composite)")
-    st.code("exec_score = 0.55 * prior_win_pct_shrunk + 0.25 * experience_normalized + 0.20 * accolade_score", language="python")
+    st.subheader("SRS (Massey rating)")
     st.markdown("""
-    Same formula shape as coaching, deliberately kept **out of the composite score**: an executive's
-    "win%" here is literally the same team's actual win total during their tenure, so folding it into a
-    composite that already scores SRS/Net Rating for the same seasons would double-count the same
-    outcome under two different labels. It's shown as a standalone percentile on the comparison view and
-    the Executive leaderboard instead - useful context, not treated as independent evidence.
+    Solved via points-based Massey least-squares over every regular-season team-game: each team's
+    offense and defense ratings are fit simultaneously across the whole schedule graph, so the
+    result is schedule-adjusted by construction (no separate SOS bolt-on needed for the rating
+    itself). Blowout margins are capped at the 95th percentile (26 points) before fitting, so a
+    handful of lopsided games don't dominate the L2 loss - `srs`, `srs_off`, and `srs_def` all live
+    on this capped-margin scale.
 
-    A real data limitation worth stating plainly: `exec_tenures.csv` has no win/loss data at all (only
-    tenure dates), so unlike coaching there's no tenure-aggregate fallback for pre-1980 executive history -
-    that data is simply unavailable further back, not just harder to compute.
-    """)
-    st.warning("⚠️ Both the coaching and executive formulas are early-stage - the weights (0.55/0.25/0.20) were a reasonable starting point, not the product of a rigorous fitting/validation process. Flagged for further back-and-forth analysis and tuning.")
+    `sos` is the games-weighted mean of a team's opponents' own SRS ratings - deliberately **not**
+    `srs - mov`, which would mix capped-rating units against raw-margin units (a unit error, even
+    though the two are numerically close).
 
-    st.subheader("The pre-1980 coaching data problem, and the hybrid fix")
-    st.markdown("""
-    File 1 only goes back to **1979-80**. For any coaching tenure that ended *entirely* before 1980,
-    this model falls back to that tenure's aggregate win-loss record (from `coach_tenures.csv`). A tenure
-    that *straddles* the 1980 cutoff is deliberately **excluded** from this fallback, since the aggregate
-    can't be split and using it whole would double-count games already captured at the season level.
+    Validated: `corr(srs, net_rating) = 0.992` league-wide, and margin-treatment choice (raw vs.
+    cap vs. tanh) barely moves team rankings (Spearman ρ = 0.999 between raw and capped).
     """)
 
-    st.subheader("The 1978-79 'background data' architecture")
+    st.subheader("Win Shares")
     st.markdown("""
-    File 1 (team stats) and File 2 (playoffs) were both extended to include 1978-79, giving that season
-    a fully real, computed composite score - not just enough to power the roster diff, but enough to
-    support genuine Record and Composite Score "vs. prior season" comparisons and Year-over-Year Change
-    calculations for every 1979-80 team (e.g. correctly surfacing the 1979-80 Celtics' +32 wins and
-    Larry Bird's arrival as the largest single-season jump tied to that boundary in the dataset).
-
-    1978-79 is still deliberately kept **out of every selectable population**: it's not a dropdown option,
-    doesn't appear as its own row on any leaderboard, and can never be picked as Team A or B. It exists
-    purely as backing data for whatever needs a "prior season" reference to 1979-80. Under the hood, this
-    means the app maintains two views of the same underlying table: the full 1,336-row population (used
-    for z-scoring, prior-season lookups, and Year-over-Year deltas) and a filtered 1,314-row "selectable"
-    view (used for every dropdown, leaderboard, and ranking) - both are computed once, and it's purely a
-    display-layer filter that keeps 1978-79 from ever surfacing as a pickable option, not a separate
-    scoring pipeline.
-
-    Coach/exec continuity for the 1979-80 boundary specifically also has a second-tier fallback using
-    `coach_tenures`/`exec_tenures` directly (which extend back to 1947, further than File 1 ever will),
-    for cases where even the extended File 1 data wouldn't help.
+    Rebuilt in-house via Dean Oliver's method, straight from the box score - no
+    Basketball-Reference dependency (`nba_api` doesn't carry pre-built Win Shares). Validated to
+    sum to roughly the team's actual win total (~1.008× across all team-seasons). PIE is also
+    surfaced as a second, outcome-agnostic footprint metric; the two contribution shares
+    (footprint via PIE, win-translation via WS) are shown side by side wherever a roster breaks
+    down - the *gap* between them is itself a signal worth reading, not noise to average away.
     """)
 
-    st.subheader("Player win-share contribution")
-    st.code("player_pct_of_wins = (player_WS / team_total_WS) * team_actual_wins", language="python")
+    st.subheader("Era adjustment")
     st.markdown("""
-    Rows with a combined multi-team label (e.g. `"BOS,GSW"` - a player traded mid-season from a
-    season-wide, non-team-filtered pull) are **excluded** from this calculation and show a blank
-    percentage rather than a number. Grouping by the literal team-code string means a combined label
-    forms a group of exactly one player, which would otherwise make their share trivially (and
-    misleadingly) 100% - not a real signal, since a blended multi-team season isn't a coherent "share of
-    one team's roster" in the first place.
-    """)
-
-    st.subheader("Era adjustment (quantile mapping)")
-    st.markdown("""
-    The era-adjustment toggle restates a team's SRS, Net Rating, Roster/WS, and Coaching score as if they
-    played in a different ("base") era, using **quantile mapping**: find the team's percentile within
-    their own era's distribution, then read off the value at that same percentile in the base era's
-    distribution. Playoffs is deliberately **not** quantile-mapped (a championship means the same thing
-    in any era) but is re-standardized against the base era's own playoff distribution so it still
-    combines consistently with the adjusted metrics. When enabled, this fully recomputes the category
-    edges, composite score, and winner - not just a display overlay.
-    """)
+    The mechanism exists (quantile-mapping a team's Quality/Roster values onto an equivalent
+    percentile in a different era's distribution) but the toggle is **hidden** for the WNBA: real
+    era boundaries haven't been validated yet via the offline PELT changepoint study the NBA
+    version uses, so every WNBA season currently buckets into a single placeholder era
+    (`{}`). Turning quantile-mapping on against a single-era population would be
+    an identity transform anyway - nothing to show. The underlying code path is intact and
+    unreachable rather than removed, so it activates with no rework once that analysis is done
+    (flagged as a separate future session).
+    """.format(ERA_BOUNDARIES[LEAGUE][0][2]))
 
     st.subheader("Box-and-whisker population toggle")
     st.markdown("""
-    Every box-and-whisker section (Scored Categories, Four Factors, Additional Advanced Metrics) offers
-    the same choice: plot both teams' dots against the **all-time pooled** distribution, or against
-    **each team's own era**. When the two teams share an era, that's one box; when they're from
-    different eras, each team's dot is shown against its own era's distribution side by side, rather than
-    pooling two different populations together.
+    Every box-and-whisker section (Scored Categories, Four Factors, Additional Advanced Metrics)
+    offers a choice between plotting both teams' dots against the **all-time pooled** distribution
+    or **each team's own era**. With only one placeholder era currently defined, these two modes
+    are equivalent for now - the toggle is kept live so it starts doing real work the moment
+    genuine era boundaries exist.
     """)
 
     st.subheader("Quartile color coding")
@@ -831,138 +754,48 @@ with tab_methodology:
 
     st.subheader("What's NOT scored (display-only)")
     st.markdown("""
-    - **Shooting splits, Four Factors, and other advanced metrics** - Net Rating already captures the
-      efficiency signal these feed into; scoring them separately would double-count.
-    - **Payroll** - deferred entirely; historical salary data is thin/unreliable pre-1990s.
-    - **Executives** - see above; tracked and percentiled, never composited.
+    - **Shooting splits, Four Factors, Pace, and other advanced metrics** - Quality already captures
+      the efficiency signal these feed into; scoring them separately would double-count.
+    - **Net Rating** - shown in Additional Advanced Metrics as context; it's the fallback input to
+      Quality when SRS is unavailable, not a separate scored slot.
+    - **Coaching / Executives** - not sourced for the WNBA yet; see the Leaderboards tab.
     """)
 
     st.subheader("Known limitations, stated plainly")
     st.markdown("""
-    - Seasons with more than one coach score each coach independently using their own prior history;
-      the games-based split between them (when derivable) reflects tenure-level data, not exact dates.
-    - Executive win totals assume date-range tenure overlap maps cleanly onto season boundaries.
-    - `coach_tenures.csv` has a known mislabeling issue for at least one franchise (some Charlotte
-      Bobcats-labeled rows actually contain the original Charlotte Hornets' pre-2002 history) - worked
-      around via the 1979-80-only fallback restriction above, but the source file itself still needs a
-      manual cleanup pass.
-    - Coaching and executive scoring formulas are directional first drafts, not finalized.
-    - The New Orleans Jazz (Utah's franchise before their 1979 relocation) required adding a new team
-      code (`NOJ`) and franchise-lineage entry - a good example of the kind of one-off franchise-history
-      gap that surfaces whenever the data range gets extended.
+    - **WNBA eras are pending** - the PELT changepoint study that produced the NBA's six eras
+      hasn't been run for the WNBA yet. Until it is, era-based rankings and the era-adjustment
+      toggle are effectively no-ops.
+    - **PER / BPM / VORP are unavailable** - `nba_api` doesn't carry these for the WNBA, so they're
+      not referenced anywhere in this app (they were part of the old Basketball-Reference-sourced
+      NBA model).
+    - **Multi-team (traded) players' Win Shares are approximate** - computed against their listed
+      team's context only; a blended multi-team box-score line isn't a fully coherent
+      single-team season.
+    - **1997-2000 WNBA playoff results have a confirmed data gap** in the underlying API (not a
+      pipeline bug) - a manual backfill from an independent source is planned but not yet merged.
+    - **Coach and executive data is not yet sourced** for the WNBA at all - a distinct, manual data
+      mode from the rest of the automated pipeline, tracked as separate future work.
     """)
-
-    st.divider()
-    st.header("Era Classification Methodology")
-    st.markdown("""
-    Six eras are used throughout the app for filtering and comparing teams against contemporaries.
-    Boundaries went through a three-step validation process: candidate boundaries from known NBA
-    rule-change history, validation against league-wide trend data, and an objective cross-check via
-    PELT changepoint detection (run separately on offense/pace and defense signal sets, at multiple
-    penalty sensitivities, since offense-driven and defense-driven regime shifts turned out to be
-    genuinely different structural forces rather than always coinciding).
-    """)
-
-    st.subheader("Changepoint detection results")
-    cp_results = pd.DataFrame([
-        {"Signal set": "Offense/Pace (pace, ORtg, eFG%, 3PAr)", "Most robust break(s)": "1993-94, 2018-19",
-         "Weaker/penalty-dependent": "2003-04, 2013-14"},
-        {"Signal set": "Defense (opp. TOV%, DRB%, opp. FTr, STL/BLK rate)", "Most robust break(s)": "2003-04",
-         "Weaker/penalty-dependent": "1988-89, 2013-14"},
-    ])
-    st.table(cp_results)
-
-    st.subheader("Era-by-era: what actually happened, and why")
-    st.markdown("""
-    **The Pace & Post Era (1979-80 to 1993-94)** — the baseline period. The 3-point line existed
-    (introduced 1979-80) but was barely used strategically; offense was built around traditional
-    half-court and post play at high pace. No strong break signal needed to define this era's start -
-    it's simply everything before the first real regime shift.
-
-    **The Short Arc Era (1994-95 to 1996-97)** — the NBA's shortened 3-point line experiment, and the
-    **strongest changepoint in the entire 46-year dataset**, robust at every penalty level tested on the
-    offense signal. 3-point attempt rate spikes from 0.12 the year before to ~0.19-0.21 during these three
-    seasons, then drops back to 0.16 the moment the line reverted to its original distance in 1997-98 -
-    a real, temporary anomaly, not a lasting stylistic shift, which is why it gets its own short era
-    rather than being folded into a neighbor.
-
-    **The Dead-Ball Era (1997-98 to 2003-04)** — pace and scoring both bottom out league-wide; this is
-    the well-documented low-scoring, physical-defense period. Its end (2003-04) is the **single strongest
-    break in the defensive signal set**, more robust there than anywhere on the offense side - makes sense,
-    since what ended this era was fundamentally a defensive rule change (see next).
-
-    **The Freedom of Movement Era (2004-05 to 2013-14)** — named after the NBA's own term for the 2004
-    hand-checking/illegal-defense reform. ORtg jumps from 102.9 to 106.1 the very next season - a clean,
-    immediate break in scoring efficiency. Notably, **pace does NOT recover at this boundary** - it stays
-    flat/depressed (~90-92) all the way through 2011-12, only climbing starting ~2012-13. Two different
-    metrics, two different break patterns: the 2004 rule change reshaped *efficiency*, not *tempo*.
-
-    **The Pace & Space Build-Up (2014-15 to 2018-19)** — gradual acceleration of both tempo and 3-point
-    rate, a moderate offense-side signal (visible at looser penalties, not the most conservative one) -
-    the runway before the sharper break that follows.
-
-    **The Efficiency Explosion (2019-20 to present)** — the **second-strongest break in the whole dataset**,
-    robust at every penalty level tested, exactly as strong a signal as the Short Arc Era's start. eFG%
-    jumps from .502 to .514 to .521 to .524 across 2016-17 through 2018-19, and league-average ORtg breaks
-    110 for the first time right at this boundary, climbing to 114-115+ by 2022-25. Unlike the Dead-Ball
-    Era's end, this break shows **no corresponding defensive-side signal** - it looks like a pure offensive
-    strategy shift (shot selection, spacing) rather than a rule-driven change on defense.
-    """)
-
-    st.subheader("What didn't define an era, and why that's informative")
-    st.markdown("""
-    - **League-wide variance has been shrinking**, not just the mean shifting - std(pace) and std(ORtg)
-      are both visibly tighter in 2018-present than across most of NBA history. This is exactly why the
-      composite score offers both pooled and within-era standardization: a raw point differential in a
-      low-variance recent season represents a more extreme percentile finish than the same number would
-      in a high-variance 1980s season.
-    - **Offensive and defensive rebounding are smooth secular trends, not regime shifts** - ORB% declines
-      continuously from 33.5% to the low-20s over the full 46 years (with a slight recent uptick), DRB%
-      is its mirror image. Neither supports a discrete era boundary on its own, which is why rebounding
-      wasn't used as an era-defining metric despite the size of the long-run change.
-    - **Competitive balance (spread of team SRS within a season) tracks no proposed boundary at all** -
-      it fluctuates between roughly 3.1 and 6.0 with no clean pattern tied to any of the six eras,
-      suggesting parity/dominance cycles are an independent dimension from *style* eras, not something
-      that moves in lockstep with pace, spacing, or rule changes.
-    """)
-
-    era_table = pd.DataFrame([
-        {"Era": label, "Seasons": f"{start} to {end}"} for start, end, label in ERA_BOUNDARIES[league]
-    ])
-    st.table(era_table)
 
     st.divider()
     st.header("Future Enhancements")
     st.markdown("""
-    This is a working v1, not a finished product. Concrete directions for further sophistication:
+    This is a working v1 of the WNBA migration, not a finished product. Concrete next steps:
 
-    **Additional data sources**
-    - **Deeper playoff data**: currently just an ordinal round-reached scale - series length, margin of
-      victory in each round, and opponent quality faced would let playoff performance carry real
-      information beyond "how far did they get."
-    - **Payroll/salary data**: deferred entirely so far; historical salary data is thin and unreliable
-      pre-1990s, but could be layered in for recent decades to explore value-for-money questions
-      (wins per payroll dollar) rather than just raw spending.
-    - **Additional player/team-level metrics**: shot-location and shot-quality data, on/off-court impact
-      metrics, and lineup-level data would all deepen the Roster and Four Factors analysis well beyond
-      what season-long box-score aggregates can show.
-
-    **Predictive modeling and optimization**
-    - **Fitting the composite weights rather than hand-setting them**: the current SRS/Net Rating/
-      Playoffs/Roster/Coaching weights (30/20/15/20/15) and the coaching/exec sub-formula weights
-      (0.55/0.25/0.20) were reasonable starting points, not the output of a rigorous fitting process.
-      A natural next step: define a target outcome (e.g. predicting next-season win total, or matching
-      some independent "greatest teams" consensus ranking) and fit weights via regression or a
-      constrained optimization, rather than asserting them.
-    - **ML-based feature selection**: techniques like gradient-boosted trees or LASSO regression could
-      surface which underlying signals actually carry the most predictive weight, potentially revealing
-      that some currently-weighted factors matter less than assumed, or that an unused metric
-      (e.g. a Four Factors component, or SOS specifically) deserves a place in the composite.
-    - **Tuning the shrinkage constants empirically**: the coaching/exec Bayesian shrinkage pseudo-games
-      constant (41, roughly half a season) was a reasonable-sounding default, not cross-validated against
-      actual predictive performance - a natural target for the same fitting exercise.
-
-    These are flagged as a deliberate follow-up phase, not gaps in the current build - the present version
-    prioritized getting the data pipeline, methodology, and transparency right first, with optimization
-    as the next layer once that foundation is trusted.
+    - **WNBA era boundaries**: run the offline PELT changepoint study (as already done for the NBA)
+      and swap real boundaries into `ERA_BOUNDARIES['WNBA']` - nothing else in the scoring or app
+      code needs to change once that lookup table is populated.
+    - **WNBA-specific Bayesian shrinkage calibration**: the coaching pseudo-games constant (and any
+      future shrinkage constants) should be recalibrated for the WNBA's much shorter ~29-season
+      history rather than reusing NBA-tuned defaults.
+    - **1997-2000 playoff backfill**: a manually sourced, documented supplement CSV, merged at load
+      time with a loud error on any season/team overlap against the primary pipeline.
+    - **Coach and executive data sourcing**: a genuinely separate work chunk (manual lookup/entry,
+      not an `nba_api` pull) - once it exists, the dormant coaching/exec code paths in `scoring.py`
+      activate with minimal rework, exactly as designed.
+    - **Fitting the composite weights rather than hand-setting them**: the current Quality/Playoffs/
+      Roster split (45/40/15) is a reasonable, empirically-motivated starting point (see the
+      signal-independence analysis above), not the output of a rigorous fitting process against an
+      external target.
     """)

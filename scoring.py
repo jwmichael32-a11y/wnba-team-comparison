@@ -1,39 +1,68 @@
 """
 scoring.py
 
-Implements the team-comparison scoring model:
-- 4 base scored categories (SRS, Net Rating, Playoffs, Roster/Win Shares)
-- Coaching as a 5th scored category, built from "at the time" coach stats
-- Everything else (shooting, four factors, standings, payroll, exec) is
-  informational/display-only, not part of the composite score
+Implements the team-comparison scoring model (canonical snake_case contract,
+nba_api-sourced; Basketball-Reference fully severed).
 
-Weights (locked in during project scoping):
-  SRS            30%
-  Net Rating     20%
-  Playoffs       15%
-  Roster/WS      20%
-  Coaching       15%
+Three scored categories, chosen for signal INDEPENDENCE rather than coverage:
+- Quality  : the Massey `srs` (schedule-adjusted point differential). Falls
+             back to `net_rating` for any season lacking a game-log-derived srs
+             (they correlate 0.992, and net_rating covers every team-season).
+- Playoffs : depth-honest postseason ordinal (see PLAYOFF_ORDINAL).
+- Roster   : Sum of the roster's (pie x minutes) -- an extensive personnel
+             signal, single-team rows only.
+
+Everything else (shooting, four factors, standings, coaching, exec) is
+informational/display-only, NOT part of the composite.
+
+Why this shape (empirically grounded, not stylistic):
+  The old model carried SRS (0.30) AND Net Rating (0.20) as separate categories;
+  the Massey srs and net_rating correlate 0.992, so scoring both was counting
+  one signal twice at half the composite. They are collapsed into one Quality
+  axis. Coaching was removed from the composite entirely: any prior-record
+  coaching signal is itself correlated with team quality (re-importing it), the
+  award component scores a team the year AFTER recognition was earned (a lag
+  artifact), and there is no WNBA coach data regardless -- so coaching is now
+  qualitative/display-only. Roster (pie x min) is retained at a light weight,
+  acknowledged as ~0.85 correlated with Quality; the genuinely independent axis
+  is Playoffs (~0.79 with Quality), which is why it carries real weight.
+
+Weights: the one subjective knob -- a values choice about what the score MEANS
+  (regular-season dominance vs. postseason achievement). Edit WEIGHTS below to
+  retune; the assertion keeps them a proper distribution.
 
 Playoff round -> ordinal scale used for scoring:
   0 = missed playoffs, 1 = lost 3 rounds from title, 2 = lost 2 rounds from
-  title, 3 = lost 1 round from title (i.e. the round before the Finals),
-  4 = lost Finals, 5 = Champion. Labels state distance-from-title rather than
-  literal round numbers, because the WNBA's bracket depth varies by era, so a
-  fixed round name (e.g. "R1") would misstate what round a team actually lost
-  in. Scoring uses depth from the title so runs stay comparable across eras.
-  4 = lost Finals, 5 = Champion
+  title, 3 = lost 1 round from title (the round before the Finals), 4 = lost
+  Finals, 5 = Champion. Labels state distance-from-title rather than literal
+  round numbers, because the WNBA's bracket depth varies by era, so a fixed
+  round name (e.g. "R1") would misstate what round a team actually lost in.
 """
 
 import pandas as pd
 import numpy as np
 
+# The three composite weights. This is the only values-based knob in the model;
+# change these numbers to retune. They must form a distribution (sum to 1).
 WEIGHTS = {
-    'srs': 0.30,
-    'net_rating': 0.20,
-    'playoffs': 0.15,
-    'roster_ws': 0.20,
-    'coaching': 0.15,
+    'quality':  0.45,   # Massey srs (schedule-adjusted), net_rating fallback
+    'playoffs': 0.40,   # depth-honest postseason ordinal
+    'roster':   0.15,   # sum(pie x minutes) across the roster
 }
+assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, "WEIGHTS must sum to 1.0"
+
+
+def normalize_weights(weights):
+    """Coerce a user-supplied weight dict into a proper distribution (non-negative,
+    sums to 1) over the three scored categories. Missing keys default to 0; an
+    all-zero input falls back to the module default. This lets the app expose raw
+    slider values (any scale) and hand them straight in."""
+    keys = ('quality', 'playoffs', 'roster')
+    w = {k: max(float(weights.get(k, 0.0)), 0.0) for k in keys}
+    total = sum(w.values())
+    if total <= 0:
+        return dict(WEIGHTS)
+    return {k: v / total for k, v in w.items()}
 
 PLAYOFF_ORDINAL = {
     'Lost 3 Rounds From Title': 1,
@@ -61,7 +90,8 @@ DATA_CUTOFF_SEASON = {
 }
 
 STAT_DEFINITIONS = {
-    'SRS': "Simple Rating System - point differential adjusted for strength of schedule. 0 = league average.",
+    'SRS': "Massey rating - point differential solved simultaneously over the whole schedule so it's adjusted for strength of schedule (blowouts capped at the 95th percentile). 0 = league average.",
+    'Quality': "Composite team-strength axis: the Massey SRS (net_rating fallback where no game logs exist).",
     'Net Rating': "Offensive Rating minus Defensive Rating - points scored vs. allowed per 100 possessions.",
     'ORtg': "Offensive Rating - points scored per 100 possessions.",
     'DRtg': "Defensive Rating - points allowed per 100 possessions (lower is better).",
@@ -74,16 +104,15 @@ STAT_DEFINITIONS = {
     'FTr': "Free Throw Rate - free throw attempts relative to field goal attempts (how often a team gets to the line).",
     'MOV': "Margin of Victory - average point differential per game.",
     'SOS': "Strength of Schedule - how much tougher/easier than average a team's opponents were.",
-    'WS': "Win Shares - an estimate of how many wins a player is individually responsible for.",
-    'WS/48': "Win Shares per 48 minutes - a per-game-length rate, for comparing players who played different amounts.",
-    'PER': "Player Efficiency Rating - an all-in-one per-minute production score, league average = 15.",
-    'BPM': "Box Plus/Minus - estimated points per 100 possessions a player contributes above a league-average player.",
-    'VORP': "Value Over Replacement Player - BPM translated into total season value vs. a bench-level replacement.",
+    'PIE': "Player Impact Estimate - a player's share of the weighted box-score events (scoring, rebounds, assists, steals, blocks, minus misses/turnovers/fouls) in their games. An all-in-one footprint metric, outcome-agnostic.",
+    'WS': "Win Shares (Oliver method) - an estimate of how many wins a player is individually responsible for; a roster's WS sum to about the team's actual win total. Outcome-anchored and efficiency-weighted (contrast PIE).",
+    'OWS': "Offensive Win Shares - the offensive half of Win Shares, from points produced vs. a league-average baseline.",
+    'DWS': "Defensive Win Shares - the defensive half of Win Shares, from an individual defensive rating and team defensive context.",
     'USG%': "Usage % - share of a team's offensive plays used by a player while on the floor.",
     'Playoffs': "Ordinal scale: 0 = missed playoffs, up to 5 = won the championship.",
-    'Coaching': "0.55x prior win% (shrunk toward league average for small samples) + 0.25x prior experience + 0.20x prior awards. Uses only seasons BEFORE the one evaluated.",
-    'Roster (Win Shares)': "Sum of the whole roster's Win Shares for that season - the personnel-strength signal.",
-    '% of team wins': "Player's Win Shares as a share of the team's total POSITIVE Win Shares, scaled to the team's real win total. Blank for multi-team combined seasons (a player traded mid-year), since the metric isn't meaningful for a blended team label.",
+    'Roster': "Sum of the roster's (PIE x minutes) for that season - an extensive personnel-strength signal. Single-team rows only.",
+    '% of team impact': "Player's (PIE x minutes) as a share of the team's roster total (footprint). Blank for multi-team combined seasons.",
+    '% of team wins': "Player's Win Shares as a share of the team's positive-WS pool (win-translation). Blank for multi-team combined seasons. Read against % of team impact: the gap is footprint vs. how much converted to winning.",
     'MP': "Minutes Played.",
 }
 
@@ -158,10 +187,8 @@ def _cutoff_year(league):
 # ----------------------------------------------------------------------
 
 ERA_ADJUSTABLE_METRICS = {
-    'SRS': 'Miscellaneous: SRS',
-    'Net Rating': '_net_rating',   # computed column, handled specially below
-    'Roster (Win Shares)': 'team_total_ws',
-    'Coaching': 'coaching_score',
+    'Quality': 'quality_metric',    # Massey srs (net_rating fallback), a real column
+    'Roster': 'roster_strength',    # sum(pie x min)
 }
 # Playoffs is deliberately excluded - a championship means the same thing
 # in any era, so its RAW value isn't transformed. It's still re-standardized
@@ -198,7 +225,7 @@ def quantile_map_to_era(value, source_era_values, target_era_values):
     return float(np.quantile(target_era_values, percentile))
 
 
-def apply_era_adjustment(scored_table, row_a, row_b, base_era):
+def apply_era_adjustment(scored_table, row_a, row_b, base_era, weights=None):
     """
     Recomputes both teams' metrics, z-scores, category edges, and composite
     score as if each team's performance were restated into the base_era's
@@ -206,7 +233,6 @@ def apply_era_adjustment(scored_table, row_a, row_b, base_era):
     it's a drop-in replacement for the comparison view when the toggle is on.
     """
     scored_table = scored_table.copy()
-    scored_table['_net_rating'] = scored_table['Miscellaneous: ORtg'] - scored_table['Miscellaneous: DRtg']
 
     base_pop = scored_table[scored_table['era'] == base_era]
 
@@ -215,11 +241,7 @@ def apply_era_adjustment(scored_table, row_a, row_b, base_era):
         own_pop = scored_table[scored_table['era'] == own_era]
         adjusted = {}
         for label, col in ERA_ADJUSTABLE_METRICS.items():
-            if col == '_net_rating':
-                row_value = row['Miscellaneous: ORtg'] - row['Miscellaneous: DRtg']
-            else:
-                row_value = row[col]
-            adjusted[label] = quantile_map_to_era(row_value, own_pop[col], base_pop[col])
+            adjusted[label] = quantile_map_to_era(row[col], own_pop[col], base_pop[col])
         return adjusted
 
     adj_a = adjust_team(row_a)
@@ -242,9 +264,10 @@ def apply_era_adjustment(scored_table, row_a, row_b, base_era):
     z_playoffs_a = (row_a['playoff_ordinal'] - playoff_mean) / playoff_std if playoff_std else 0
     z_playoffs_b = (row_b['playoff_ordinal'] - playoff_mean) / playoff_std if playoff_std else 0
 
-    weight_key_map = {'SRS': 'srs', 'Net Rating': 'net_rating', 'Roster (Win Shares)': 'roster_ws', 'Coaching': 'coaching'}
-    composite_a = sum(z_a[label] * WEIGHTS[weight_key_map[label]] for label in z_a) + z_playoffs_a * WEIGHTS['playoffs']
-    composite_b = sum(z_b[label] * WEIGHTS[weight_key_map[label]] for label in z_b) + z_playoffs_b * WEIGHTS['playoffs']
+    weight_key_map = {'Quality': 'quality', 'Roster': 'roster'}
+    W = normalize_weights(weights) if weights is not None else dict(WEIGHTS)
+    composite_a = sum(z_a[label] * W[weight_key_map[label]] for label in z_a) + z_playoffs_a * W['playoffs']
+    composite_b = sum(z_b[label] * W[weight_key_map[label]] for label in z_b) + z_playoffs_b * W['playoffs']
 
     edges = {label: ('A' if adj_a[label] > adj_b[label] else 'B') for label in ERA_ADJUSTABLE_METRICS}
     edges['Playoffs'] = 'A' if row_a['playoff_ordinal'] > row_b['playoff_ordinal'] else ('B' if row_b['playoff_ordinal'] > row_a['playoff_ordinal'] else 'Tie')
@@ -291,11 +314,11 @@ def build_team_season_table(team_stats, playoff_results, league):
     """
     df = team_stats.copy()
 
-    playoff_lookup = playoff_results.set_index(['Season', 'team_code'])['playoff_round_reached'].to_dict()
-    made_playoffs_lookup = set(playoff_results.set_index(['Season', 'team_code']).index)
+    playoff_lookup = playoff_results.set_index(['season', 'team_code'])['playoff_round_reached'].to_dict()
+    made_playoffs_lookup = set(playoff_results.set_index(['season', 'team_code']).index)
 
     def get_round(row):
-        key = (row['Season'], row['Team'])
+        key = (row['season'], row['team_code'])
         if key not in made_playoffs_lookup:
             return ('missed', None)
         result = playoff_lookup.get(key)
@@ -313,50 +336,75 @@ def build_team_season_table(team_stats, playoff_results, league):
     # not zero, so the composite score doesn't punish a team for a data gap
     neutral_ordinal = df.loc[df['playoff_status'] == 'resolved', 'playoff_ordinal_raw'].mean()
     df['playoff_ordinal'] = df['playoff_ordinal_raw'].fillna(neutral_ordinal)
-    df['era'] = df['Season'].apply(lambda s: get_era(s, league))
+    df['era'] = df['season'].apply(lambda s: get_era(s, league))
+
+    # Quality axis input: Massey srs where present, else net_rating (0.992
+    # correlated, and net_rating covers every team-season) so a season without
+    # game-log-derived srs still scores instead of dropping to NaN.
+    if 'srs' in df.columns:
+        df['quality_metric'] = df['srs'].where(df['srs'].notna(), df['net_rating'])
+    else:
+        df['quality_metric'] = df['net_rating']
 
     return df
 
 
 def build_roster_strength_table(player_stats):
-    """Sums team win shares per season as the roster-strength raw metric."""
-    team_ws = player_stats.groupby(['Season', 'Team'])['WS'].sum().reset_index()
-    return team_ws.rename(columns={'WS': 'team_total_ws'})
+    """Roster-strength raw metric = sum of (PIE x minutes) over a team's
+    single-team player rows.
+
+    PIE is a per-game SHARE (intensive), so summing raw PIE across a roster is
+    noisy and not additive the way Win Shares was. Weighting by minutes makes it
+    extensive -- sum(pie x min) rewards both quality and playing time and behaves
+    like a personnel-strength total. Multi-team combined rows (team_count > 1) are
+    excluded, since a blended multi-team line attributed to one code would
+    over-credit that team."""
+    single = player_stats[player_stats['team_count'] == 1].copy()
+    single['pie_min'] = single['pie'] * single['min']
+    team = single.groupby(['season', 'team_code'])['pie_min'].sum().reset_index()
+    return team.rename(columns={'pie_min': 'roster_strength'})
 
 
-def compute_player_win_shares(player_stats, team_stats):
-    """Renormalizes each player's WS so a team's players' shares sum to that
-    team's actual win total (per-season, per-team).
+def compute_player_roster_shares(player_stats, team_stats=None):
+    """Per-player roster impact and each player's share of their team's roster.
 
-    Denominator is the sum of ONLY positive-WS players per team-season, not
-    every player including negative contributors. A team with several
-    negative-WS bench players (common on very bad teams) would otherwise
-    have an artificially small denominator, inflating everyone else's share -
-    e.g. Derek Harper's 2.7 WS on the historically-bad 1992-93 Mavericks
-    showed as 60% under the old all-inclusive formula (dividing by a
-    denominator collapsed to 4.5 by negative teammates), implying he was
-    worth ~6.6 of the team's 11 wins - nowhere close to his real 2.7 WS.
-    Under the positive-pool-only formula his share becomes 30.7%, still high
-    but no longer implying a win total his actual WS doesn't support.
-    Negative-WS players still get a percentage (now against the stable
-    positive-only pool, not one they're actively shrinking), shown as a
-    negative number reflecting their real drag on the team.
+    Impact metric is player_impact = PIE x minutes (extensive; see
+    build_roster_strength_table for why minutes-weighting rather than raw PIE).
+    Share (pct_of_team) is player_impact as a percent of the team's POSITIVE
+    impact pool per season -- the positive-only denominator keeps a few
+    negative-impact bench players from shrinking the pool and inflating
+    everyone else's share, exactly as the old positive-WS-pool did. Negative
+    contributors still receive a (negative) share against that stable pool.
 
-    Rows with a combined multi-team label (e.g. 'BOS,GSW' - a player traded
-    mid-season, from a season-wide non-team-filtered pull) are EXCLUDED from
-    this calculation entirely - a blended multi-team season isn't a coherent
-    'share of one team's roster' in the first place."""
-    df = player_stats.merge(team_stats[['Season', 'Team', 'W']], on=['Season', 'Team'], how='left')
-    is_multi_team = df['Team'].astype(str).str.contains(',', na=False)
+    Multi-team combined rows (team_count > 1 -- a player traded mid-season,
+    from a season-wide non-team-filtered pull) are EXCLUDED from the share:
+    a blended multi-team line isn't a coherent 'share of one team's roster'.
+    (team_stats is accepted for signature compatibility but no longer needed,
+    since the share is roster-internal rather than renormalized to team wins.)"""
+    df = player_stats.copy()
+    df['player_impact'] = df['pie'] * df['min']
+    is_multi_team = df['team_count'] > 1
 
-    positive_ws = df['WS'].where(df['WS'] > 0, 0)
-    positive_pool = positive_ws[~is_multi_team].groupby([df['Season'], df['Team']]).transform('sum')
+    positive_impact = df['player_impact'].where(df['player_impact'] > 0, 0)
+    positive_pool = positive_impact[~is_multi_team].groupby(
+        [df['season'], df['team_code']]).transform('sum')
     positive_pool = positive_pool.reindex(df.index)
     safe_pool = positive_pool.replace(0, np.nan)
 
-    df['ws_share_of_team_wins'] = (df['WS'] / safe_pool) * df['W']
-    df['pct_of_team_wins'] = (df['WS'] / safe_pool * 100).round(1)
-    df.loc[is_multi_team, ['ws_share_of_team_wins', 'pct_of_team_wins']] = None
+    df['pct_of_team'] = (df['player_impact'] / safe_pool * 100).round(1)
+    df.loc[is_multi_team, 'pct_of_team'] = None
+
+    # Second, independent contribution share from Win Shares (win-translation)
+    # to sit alongside the PIE-based footprint share, when WS has been built.
+    # Same positive-pool convention. The gap between a player's WS share and PIE
+    # share is the signal (footprint vs. how much it converted to winning).
+    if 'ws' in df.columns:
+        positive_ws = df['ws'].where(df['ws'] > 0, 0)
+        ws_pool = positive_ws[~is_multi_team].groupby(
+            [df['season'], df['team_code']]).transform('sum')
+        ws_pool = ws_pool.reindex(df.index).replace(0, np.nan)
+        df['pct_of_team_ws'] = (df['ws'] / ws_pool * 100).round(1)
+        df.loc[is_multi_team, 'pct_of_team_ws'] = None
     return df
 
 
@@ -439,6 +487,15 @@ def compute_coaching_score(team_season_key, coach_season_wins, league, coach_ten
     behavior rather than a special case that needs handling here.
     """
     season, team = team_season_key
+    # Degrade-gracefully guard: when a league has no coach data yet (WNBA), the
+    # frame may be empty or even columnless (pd.DataFrame()). Short-circuit to the
+    # neutral score rather than indexing a 'Season' column that isn't there. The
+    # coach internals below stay on the legacy column contract on purpose -- they
+    # get migrated when real WNBA coach data (and its actual schema) exists.
+    if coach_season_wins is None or len(coach_season_wins) == 0 \
+            or 'Season' not in coach_season_wins.columns:
+        return {'coach_name': None, 'coaching_score': 0.5, 'note': 'No coach data found'}
+
     season_coaches = coach_season_wins[
         (coach_season_wins['Season'] == season) & (coach_season_wins['Team'] == team)
     ]
@@ -725,17 +782,29 @@ def get_team_display_options(team_stats):
     franchises 12 years apart), auto-disambiguates with each code's actual
     season range rather than requiring that to be hardcoded per-team.
     """
-    codes_present = team_stats['Team'].unique()
+    # Prefer the franchise name carried in the canonical data (correct per
+    # league -- WNBA 'WAS' is the Mystics, NBA 'WAS' the Wizards), falling back
+    # to the NBA name map, then the raw code. This is why no hardcoded WNBA name
+    # map is needed: the names ride along in team_name.
+    if 'team_name' in team_stats.columns:
+        name_by_code = team_stats.groupby('team_code')['team_name'].last().to_dict()
+    else:
+        name_by_code = {}
+
+    def name_for(code):
+        return name_by_code.get(code) or TEAM_CODE_TO_NAME.get(code, code)
+
+    codes_present = team_stats['team_code'].unique()
     name_counts = {}
     for code in codes_present:
-        name = TEAM_CODE_TO_NAME.get(code, code)
+        name = name_for(code)
         name_counts[name] = name_counts.get(name, 0) + 1
 
     options = []
     for code in codes_present:
-        name = TEAM_CODE_TO_NAME.get(code, code)
+        name = name_for(code)
         if name_counts[name] > 1:
-            seasons = team_stats[team_stats['Team'] == code]['Season']
+            seasons = team_stats[team_stats['team_code'] == code]['season']
             label = f"{name} ({seasons.min()} to {seasons.max()})"
         else:
             label = name
@@ -749,12 +818,12 @@ def get_season_options_for_team(scored_table, team_code):
     for the season dropdown, prefixing a trophy emoji on seasons that
     team actually won the championship.
     """
-    team_rows = scored_table[scored_table['Team'] == team_code].sort_values('Season', ascending=False)
+    team_rows = scored_table[scored_table['team_code'] == team_code].sort_values('season', ascending=False)
     options = []
     for _, row in team_rows.iterrows():
         is_champion = row.get('playoff_round_reached') == 'Champion'
-        label = f"🏆 {row['Season']}" if is_champion else row['Season']
-        options.append((label, row['Season']))
+        label = f"🏆 {row['season']}" if is_champion else row['season']
+        options.append((label, row['season']))
     return options
 
 
@@ -857,33 +926,36 @@ def build_year_over_year_leaderboard(scored_table):
     """
     rows = []
     for _, row in scored_table.iterrows():
-        prior = get_prior_season_row(scored_table, row['Season'], row['Team'])
+        prior = get_prior_season_row(scored_table, row['season'], row['team_code'])
         if prior is None:
             continue
-        net_rating = row['Miscellaneous: ORtg'] - row['Miscellaneous: DRtg']
-        prior_net_rating = prior['Miscellaneous: ORtg'] - prior['Miscellaneous: DRtg']
         rows.append({
-            'Season': row['Season'], 'Team': row['Team'],
-            'Prior Season': f"{prior['Team']} {prior['Season']}",
-            'Composite Score Change': round(row['composite_score'] - prior['composite_score'], 3),
-            'Win Change': int(row['W']) - int(prior['W']),
-            'SRS Change': round(row['Miscellaneous: SRS'] - prior['Miscellaneous: SRS'], 2),
-            'Net Rating Change': round(net_rating - prior_net_rating, 2),
-            'Pace Change': round(row['Miscellaneous: Pace'] - prior['Miscellaneous: Pace'], 2),
-            'TS% Change': round(row['Team Shooting: TS%'] - prior['Team Shooting: TS%'], 3),
-            'Roster/WS Change': round(row['team_total_ws'] - prior['team_total_ws'], 1),
-            'Coaching Score Change': round(row['coaching_score'] - prior['coaching_score'], 3),
+            'season': row['season'], 'team_code': row['team_code'],
+            'prior_season': f"{prior['team_code']} {prior['season']}",
+            'composite_change': round(row['composite_score'] - prior['composite_score'], 3),
+            'win_change': int(row['w']) - int(prior['w']),
+            'quality_change': round(row['quality_metric'] - prior['quality_metric'], 2),
+            'net_rating_change': round(row['net_rating'] - prior['net_rating'], 2),
+            'pace_change': round(row['pace'] - prior['pace'], 2),
+            'ts_pct_change': round(row['ts_pct'] - prior['ts_pct'], 3),
+            'roster_change': round(row['roster_strength'] - prior['roster_strength'], 1),
         })
-    return pd.DataFrame(rows).sort_values('Composite Score Change', ascending=False).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values('composite_change', ascending=False).reset_index(drop=True)
 
 
-def build_player_leaderboard(player_ws_table, season_filter=None):
-    """Player-season leaderboard, optionally filtered to a single season."""
-    df = player_ws_table.copy()
+def build_player_leaderboard(player_table, season_filter=None):
+    """Player-season leaderboard, optionally filtered to a single season.
+    Sorts by Win Shares when present (the extensive win-attribution metric),
+    else by player_impact (PIE x minutes). Both PIE and WS surface so the
+    footprint vs. win-translation views sit side by side."""
+    df = player_table.copy()
     if season_filter and season_filter != "All seasons":
-        df = df[df['Season'] == season_filter]
-    cols = ['Player', 'Season', 'Team', 'Age', 'MP', 'WS', 'WS/48', 'PER', 'BPM', 'VORP', 'pct_of_team_wins']
-    return df[cols].sort_values('WS', ascending=False).reset_index(drop=True)
+        df = df[df['season'] == season_filter]
+    cols = ['player_name', 'season', 'team_code', 'age', 'min',
+            'ws', 'ows', 'dws', 'pie', 'player_impact', 'pct_of_team', 'pct_of_team_ws']
+    cols = [c for c in cols if c in df.columns]
+    sort_col = 'ws' if 'ws' in df.columns else 'player_impact'
+    return df[cols].sort_values(sort_col, ascending=False).reset_index(drop=True)
 
 
 # ----------------------------------------------------------------------
@@ -892,19 +964,37 @@ def build_player_leaderboard(player_ws_table, season_filter=None):
 # ----------------------------------------------------------------------
 
 # Franchise lineage groups, so "prior season" bridges relocations/renames
-# rather than treating a relabeled franchise as having no history. Each
-# group lists every code the SAME continuous business entity has used.
-# Codes not listed here are assumed to be their own single-code lineage.
-FRANCHISE_LINEAGES = [
-    {'SEA', 'OKC'},
-    {'NJN', 'BRK'},
-    {'CHH', 'NOH', 'NOK', 'NOP'},   # original Hornets -> relocated to New Orleans -> Katrina relabel -> Pelicans
-    {'CHA', 'CHO'},                  # Bobcats -> renamed Hornets (the CURRENT Charlotte entity, separate lineage from CHH above)
-    {'KCK', 'SAC'},
-    {'SDC', 'LAC'},
-    {'WSB', 'WAS'},
-    {'NOJ', 'UTA'},
-]
+# rather than treating a relabeled franchise as having no history. Each group
+# lists every code the SAME continuous business entity has used. KEYED BY
+# LEAGUE, because codes collide across leagues (WNBA 'DAL' is the Wings lineage;
+# NBA 'DAL' is the Mavericks, its own single code) -- a flat combined list would
+# cross-bridge them. Codes not listed under a league are their own single-code
+# lineage.
+FRANCHISE_LINEAGES = {
+    'NBA': [
+        {'SEA', 'OKC'},
+        {'NJN', 'BRK'},
+        {'CHH', 'NOH', 'NOK', 'NOP'},   # original Hornets -> New Orleans -> Katrina relabel -> Pelicans
+        {'CHA', 'CHO'},                  # Bobcats -> renamed Hornets (current Charlotte entity)
+        {'KCK', 'SAC'},
+        {'SDC', 'LAC'},
+        {'WSB', 'WAS'},
+        {'NOJ', 'UTA'},
+    ],
+    'WNBA': [
+        {'UTA', 'SAS', 'LVA'},   # Utah Starzz -> San Antonio Stars -> Las Vegas Aces
+        {'DET', 'TUL', 'DAL'},   # Detroit Shock -> Tulsa Shock -> Dallas Wings
+        {'ORL', 'CON'},          # Orlando Miracle -> Connecticut Sun
+    ],
+}
+
+
+def _lineages_for(scored_table):
+    """Franchise-lineage sets for whichever league the scored table holds,
+    read from its own `league` column so no league argument has to be threaded
+    through the display callers."""
+    league = scored_table['league'].iloc[0] if ('league' in scored_table.columns and len(scored_table)) else None
+    return FRANCHISE_LINEAGES.get(league, [])
 
 
 def get_prior_season_row(scored_table, season, team):
@@ -912,11 +1002,11 @@ def get_prior_season_row(scored_table, season, team):
     relocations/renames via FRANCHISE_LINEAGES. Returns None for a team's
     first-ever season (expansion team) or the first season after a
     relocation if the predecessor isn't in our data range."""
-    lineage = next((group for group in FRANCHISE_LINEAGES if team in group), {team})
-    candidates = scored_table[(scored_table['Team'].isin(lineage)) & (scored_table['Season'] < season)]
+    lineage = next((group for group in _lineages_for(scored_table) if team in group), {team})
+    candidates = scored_table[(scored_table['team_code'].isin(lineage)) & (scored_table['season'] < season)]
     if len(candidates) == 0:
         return None
-    return candidates.sort_values('Season').iloc[-1]
+    return candidates.sort_values('season').iloc[-1]
 
 
 def get_prior_season_label(season, team):
@@ -968,7 +1058,7 @@ def get_exec_name_for_season(exec_tenures, team, season):
 
 
 def build_transparency_panel(scored_table, player_stats, exec_season_wins, season, team,
-                               coach_tenures=None, exec_tenures=None):
+                               coach_tenures=None, exec_tenures=None, min_minutes=300):
     """
     Returns a dict describing what changed for (season, team) vs. its
     immediately prior season: roster additions/losses (sorted by minutes,
@@ -988,14 +1078,23 @@ def build_transparency_panel(scored_table, player_stats, exec_season_wins, seaso
          it degrades gracefully (empty added/lost lists) if not, and
          starts working automatically the moment that data exists, with
          no further code changes needed.
+
+    `min_minutes` filters BOTH added and lost lists to players who logged at
+    least that many minutes on the relevant side of the comparison (current
+    season for additions, prior season for losses) - a end-of-bench player
+    who appeared in a handful of garbage-time minutes isn't a "key" roster
+    change worth surfacing. Default 300 (roughly a rotation player over a
+    WNBA season). Pass 0 to disable filtering entirely.
     """
     prior_row = get_prior_season_row(scored_table, season, team)
 
     if prior_row is not None:
-        prior_season, prior_team = prior_row['Season'], prior_row['Team']
-        current_row = scored_table[(scored_table['Season'] == season) & (scored_table['Team'] == team)].iloc[0]
-        coach_current_name = current_row['coach_name']
-        coach_prior_name = prior_row['coach_name']
+        prior_season, prior_team = prior_row['season'], prior_row['team_code']
+        current_row = scored_table[(scored_table['season'] == season) & (scored_table['team_code'] == team)].iloc[0]
+        # coach_name is a display-only field attached from the (dormant for WNBA)
+        # coaching pass; .get keeps this working whether or not it's present.
+        coach_current_name = current_row.get('coach_name')
+        coach_prior_name = prior_row.get('coach_name')
         fallback_mode = False
     elif season == '1979-80':
         # ONLY the 1979-80 boundary is safe to bridge past File 1's floor -
@@ -1014,7 +1113,7 @@ def build_transparency_panel(scored_table, player_stats, exec_season_wins, seaso
             (coach_tenures is not None and len(coach_tenures[
                 (coach_tenures['Team'] == prior_team) & (coach_tenures['From'] <= prior_year) & (coach_tenures['To'] >= prior_year)
             ]) > 0) or
-            (len(player_stats[(player_stats['Season'] == prior_season) & (player_stats['Team'] == prior_team)]) > 0)
+            (len(player_stats[(player_stats['season'] == prior_season) & (player_stats['team_code'] == prior_team)]) > 0)
         )
         if not has_any_source_data:
             return {'has_prior_data': False}
@@ -1027,9 +1126,9 @@ def build_transparency_panel(scored_table, player_stats, exec_season_wins, seaso
         # (expansion franchise) - not attempted via fallback
         return {'has_prior_data': False}
 
-    current_roster = set(player_stats[(player_stats['Season'] == season) & (player_stats['Team'] == team)]['Player'])
-    prior_roster_df = player_stats[(player_stats['Season'] == prior_season) & (player_stats['Team'] == prior_team)]
-    prior_roster = set(prior_roster_df['Player'])
+    current_roster = set(player_stats[(player_stats['season'] == season) & (player_stats['team_code'] == team)]['player_name'])
+    prior_roster_df = player_stats[(player_stats['season'] == prior_season) & (player_stats['team_code'] == prior_team)]
+    prior_roster = set(prior_roster_df['player_name'])
 
     # if there's genuinely zero player data for the prior season (not just
     # some players missing), every current player would falsely look like
@@ -1040,35 +1139,22 @@ def build_transparency_panel(scored_table, player_stats, exec_season_wins, seaso
     if player_data_available_for_prior:
         added_names = current_roster - prior_roster
         lost_names = prior_roster - current_roster
-        current_players = player_stats[(player_stats['Season'] == season) & (player_stats['Team'] == team)]
-        # MP + WS: the essentials (playing time, overall value)
-        # TS%: overall scoring efficiency in ONE number (subsumes eFG% - showing
-        #      both would be redundant, TS% is the more complete of the two
-        #      since it also factors in free throws)
-        # USG%: how big a role the player had - genuinely complements WS,
-        #       since a low-usage/high-efficiency role player and a
-        #       high-usage/high-efficiency star tell very different stories
-        # TOV% intentionally excluded: it's more of a ballhandling/style
-        #       stat than a "why did this team get better or worse" driver,
-        #       and 6 columns starts crowding a table meant to be scanned
-        #       quickly, not studied
-        # MP + WS: the essentials (playing time, overall value)
-        # eFG% + USG%: chosen over eFG%+TS% because eFG%/TS% are highly
-        #       correlated (TS% is essentially eFG% plus free-throw
-        #       efficiency) - showing both is close to redundant. USG% adds
-        #       a genuinely different dimension (how big a role the player
-        #       had), which combined with WS and eFG% tells a fuller story:
-        #       efficient+high-usage = star, efficient+low-usage = quality
-        #       role player, inefficient+high-usage = a real problem.
-        # TOV% intentionally excluded: more of a ballhandling/style stat
-        #       than a "why did this team get better or worse" driver, and
-        #       5 columns is already close to the limit of quickly scannable
-        diff_cols = ['Player', 'MP', 'WS', 'eFG%', 'USG%']
-        added = current_players[current_players['Player'].isin(added_names)][diff_cols].sort_values('MP', ascending=False)
-        lost = prior_roster_df[prior_roster_df['Player'].isin(lost_names)][diff_cols].sort_values('MP', ascending=False)
+        current_players = player_stats[(player_stats['season'] == season) & (player_stats['team_code'] == team)]
+        # min + ws + pie: playing time, win value, and footprint. ws leads when
+        # built (it's the headline player-value metric); pie stays as the
+        # outcome-agnostic footprint; usg_pct adds role. efg_pct/tov_pct omitted
+        # to keep the diff scannable (ws already carries efficiency-of-value).
+        base_cols = ['player_name', 'min', 'ws', 'pie', 'usg_pct']
+        diff_cols = [c for c in base_cols if c in current_players.columns]
+        added = current_players[current_players['player_name'].isin(added_names)][diff_cols].sort_values('min', ascending=False)
+        lost = prior_roster_df[prior_roster_df['player_name'].isin(lost_names)][diff_cols].sort_values('min', ascending=False)
+        if min_minutes:
+            added = added[added['min'] >= min_minutes]
+            lost = lost[lost['min'] >= min_minutes]
     else:
-        added = pd.DataFrame(columns=['Player', 'MP', 'WS', 'eFG%', 'USG%'])
-        lost = pd.DataFrame(columns=['Player', 'MP', 'WS', 'eFG%', 'USG%'])
+        diff_cols = [c for c in ['player_name', 'min', 'ws', 'pie', 'usg_pct'] if c in player_stats.columns]
+        added = pd.DataFrame(columns=diff_cols)
+        lost = pd.DataFrame(columns=diff_cols)
 
     coach_changed = coach_current_name != coach_prior_name if (coach_current_name and coach_prior_name) else None
 
@@ -1113,7 +1199,7 @@ def compare_two_teams(scored_table, player_ws_table, team_season_a, team_season_
     composite winner, and each team's top roster contributors.
     """
     def get_row(season, team):
-        match = scored_table[(scored_table['Season'] == season) & (scored_table['Team'] == team)]
+        match = scored_table[(scored_table['season'] == season) & (scored_table['team_code'] == team)]
         return match.iloc[0] if len(match) else None
 
     a = get_row(*team_season_a)
@@ -1122,25 +1208,35 @@ def compare_two_teams(scored_table, player_ws_table, team_season_a, team_season_
         missing = team_season_a if a is None else team_season_b
         raise ValueError(f"No data found for {missing}")
 
-    net_a = a['Miscellaneous: ORtg'] - a['Miscellaneous: DRtg']
-    net_b = b['Miscellaneous: ORtg'] - b['Miscellaneous: DRtg']
-
+    # the three scored categories, in composite order
     edges = {
-        'SRS': 'A' if a['Miscellaneous: SRS'] > b['Miscellaneous: SRS'] else 'B',
-        'Net Rating': 'A' if net_a > net_b else 'B',
+        'Quality': 'A' if a['quality_metric'] > b['quality_metric'] else ('B' if b['quality_metric'] > a['quality_metric'] else 'Tie'),
         'Playoffs': 'A' if a['playoff_ordinal'] > b['playoff_ordinal'] else ('B' if b['playoff_ordinal'] > a['playoff_ordinal'] else 'Tie'),
-        'Roster (Win Shares)': 'A' if a['team_total_ws'] > b['team_total_ws'] else 'B',
-        'Coaching': 'A' if a['coaching_score'] > b['coaching_score'] else 'B',
+        'Roster': 'A' if a['roster_strength'] > b['roster_strength'] else ('B' if b['roster_strength'] > a['roster_strength'] else 'Tie'),
     }
     overall_winner = 'A' if a['composite_score'] > b['composite_score'] else 'B'
 
-    def top_roster(season, team, n=8):
-        roster = player_ws_table[(player_ws_table['Season'] == season) & (player_ws_table['Team'] == team)]
-        return roster.sort_values('WS', ascending=False).head(n)
+    def top_roster(season, team, min_minutes=300, n=25):
+        """Rotation-level roster, sorted by value (WS, falling back to
+        player_impact/PIE). Filtered by `min_minutes` rather than a hard
+        top-N-by-value cutoff -- a heavy-minutes player who had a rough,
+        low-efficiency season (e.g. negative Win Shares from high-volume,
+        low-efficiency scoring) still played real minutes and belongs on
+        this list; a fixed top-8-by-WS cutoff would silently drop them.
+        `n` is a generous safety cap (WNBA rosters top out around 20), not
+        the intended filter."""
+        roster = player_ws_table[(player_ws_table['season'] == season) & (player_ws_table['team_code'] == team)]
+        if min_minutes and 'min' in roster.columns:
+            roster = roster[roster['min'] >= min_minutes]
+        for sort_col in ('ws', 'player_impact', 'pie'):
+            if sort_col in roster.columns:
+                return roster.sort_values(sort_col, ascending=False).head(n)
+        return roster.head(n)
 
     return {
         'team_a': a, 'team_b': b,
-        'net_rating_a': net_a, 'net_rating_b': net_b,
+        'quality_a': a['quality_metric'], 'quality_b': b['quality_metric'],
+        'net_rating_a': a['net_rating'], 'net_rating_b': b['net_rating'],
         'edges': edges,
         'overall_winner': overall_winner,
         'roster_a': top_roster(*team_season_a),
@@ -1152,8 +1248,34 @@ def compare_two_teams(scored_table, player_ws_table, team_season_a, team_season_
 # FULL PIPELINE
 # ----------------------------------------------------------------------
 
+def rescore(scored_table, weights=None):
+    """Recompute composite_score and every rank column from the already-computed
+    z-columns (z_quality, z_playoffs, z_roster) under a new weight set.
+
+    This is the cheap operation the app calls on each weight-slider change: the
+    expensive table build (playoff joins, roster aggregation, z-scoring) is done
+    once by build_full_scoring_table; only the weighted sum and ranks move here.
+    `weights` is any dict over the three categories (auto-normalized); None uses
+    the module default."""
+    w = normalize_weights(weights) if weights is not None else dict(WEIGHTS)
+    df = scored_table.copy()
+    df['composite_score'] = (
+        w['quality'] * df['z_quality'] +
+        w['playoffs'] * df['z_playoffs'] +
+        w['roster'] * df['z_roster']
+    )
+    df['season_rank'] = df.groupby('season')['composite_score'].rank(ascending=False, method='min').astype(int)
+    df['season_total'] = df.groupby('season')['composite_score'].transform('count').astype(int)
+    df['era_rank'] = df.groupby('era')['composite_score'].rank(ascending=False, method='min').astype(int)
+    df['era_total'] = df.groupby('era')['composite_score'].transform('count').astype(int)
+    df['all_time_rank'] = df['composite_score'].rank(ascending=False, method='min').astype(int)
+    df['all_time_total'] = len(df)
+    return df.sort_values('composite_score', ascending=False).reset_index(drop=True)
+
+
 def build_full_scoring_table(team_stats, playoff_results, player_stats, coach_season_wins, league,
-                               coach_tenures=None, coach_awards=None, exec_season_wins=None, exec_awards=None):
+                               coach_tenures=None, coach_awards=None, exec_season_wins=None, exec_awards=None,
+                               weights=None):
     """
     Runs every team-season through the full scoring pipeline and returns
     one row per team-season with all raw metrics, sub-scores, and the
@@ -1177,11 +1299,14 @@ def build_full_scoring_table(team_stats, playoff_results, player_stats, coach_se
     """
     df = build_team_season_table(team_stats, playoff_results, league)
     roster = build_roster_strength_table(player_stats)
-    df = df.merge(roster, on=['Season', 'Team'], how='left')
-    df['team_total_ws'] = df['team_total_ws'].fillna(0)
+    df = df.merge(roster, on=['season', 'team_code'], how='left')
+    df['roster_strength'] = df['roster_strength'].fillna(0)
 
+    # Coaching is display-only now (removed from the composite), but the pass
+    # still runs so the transparency panel's coach_name field is populated. For
+    # the WNBA it degrades to neutral/None across the board (no coach data).
     coaching_results = [
-        compute_coaching_score((row['Season'], row['Team']), coach_season_wins, league, coach_tenures, coach_awards)
+        compute_coaching_score((row['season'], row['team_code']), coach_season_wins, league, coach_tenures, coach_awards)
         for _, row in df.iterrows()
     ]
     coaching_df = pd.DataFrame(coaching_results)
@@ -1189,7 +1314,7 @@ def build_full_scoring_table(team_stats, playoff_results, player_stats, coach_se
 
     if exec_season_wins is not None:
         exec_results = [
-            compute_exec_score((row['Season'], row['Team']), exec_season_wins, exec_awards)
+            compute_exec_score((row['season'], row['team_code']), exec_season_wins, exec_awards)
             for _, row in df.iterrows()
         ]
         exec_df = pd.DataFrame(exec_results)
@@ -1203,25 +1328,20 @@ def build_full_scoring_table(team_stats, playoff_results, player_stats, coach_se
         })
         df = pd.concat([df.reset_index(drop=True), exec_df.reset_index(drop=True)], axis=1)
 
-    df['z_srs'] = zscore(df['Miscellaneous: SRS'])
-    df['z_net_rating'] = zscore(df['Miscellaneous: ORtg'] - df['Miscellaneous: DRtg'])
+    # Three z-scored categories -> composite. quality_metric is the Massey srs
+    # (net_rating fallback) set in build_team_season_table; roster_strength is
+    # sum(pie x min). Coaching and net-rating-as-its-own-slot are intentionally
+    # gone (see module docstring / WEIGHTS).
+    # Three z-scored categories -> composite. quality_metric is the Massey srs
+    # (net_rating fallback) set in build_team_season_table; roster_strength is
+    # sum(pie x min). Coaching and net-rating-as-its-own-slot are intentionally
+    # gone (see module docstring / WEIGHTS).
+    df['z_quality'] = zscore(df['quality_metric'])
     df['z_playoffs'] = zscore(df['playoff_ordinal'])
-    df['z_roster_ws'] = zscore(df['team_total_ws'])
-    df['z_coaching'] = zscore(df['coaching_score'])
+    df['z_roster'] = zscore(df['roster_strength'])
 
-    df['composite_score'] = (
-        WEIGHTS['srs'] * df['z_srs'] +
-        WEIGHTS['net_rating'] * df['z_net_rating'] +
-        WEIGHTS['playoffs'] * df['z_playoffs'] +
-        WEIGHTS['roster_ws'] * df['z_roster_ws'] +
-        WEIGHTS['coaching'] * df['z_coaching']
-    )
-
-    df['season_rank'] = df.groupby('Season')['composite_score'].rank(ascending=False, method='min').astype(int)
-    df['season_total'] = df.groupby('Season')['composite_score'].transform('count').astype(int)
-    df['era_rank'] = df.groupby('era')['composite_score'].rank(ascending=False, method='min').astype(int)
-    df['era_total'] = df.groupby('era')['composite_score'].transform('count').astype(int)
-    df['all_time_rank'] = df['composite_score'].rank(ascending=False, method='min').astype(int)
-    df['all_time_total'] = len(df)
-
-    return df.sort_values('composite_score', ascending=False).reset_index(drop=True)
+    # composite + ranks under the requested weights (default WEIGHTS). The
+    # z-columns above are weight-independent, so re-weighting is delegated to the
+    # cheap rescore() below -- which is exactly what the app calls on each slider
+    # change without paying for the joins/aggregation again.
+    return rescore(df, weights)

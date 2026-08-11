@@ -13,6 +13,10 @@ RAW = os.path.join(os.path.dirname(__file__), 'data', 'raw', 'WNBA')
 
 if group == 'player':
     keys = ['player_base', 'player_advanced', 'player_usage']
+elif group == 'regular':
+    keys = ['regular_games']
+elif group == 'playoff':
+    keys = ['playoff_games']
 else:
     keys = ['team_base', 'team_advanced', 'team_four_factors', 'team_opponent']
 
